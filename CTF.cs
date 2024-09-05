@@ -1186,7 +1186,7 @@ namespace InfServer.Script.GameType_CTF
                 flag.posY = defense.flagY;
 
                 Helpers.Object_Flags(arena.Players, flag);
-                arena.sendArenaMessage(String.Format("&Minerals, flag, and auto-kits dropped at {0}", payload.ToUpper()));
+                arena.sendArenaMessage(String.Format("&Minerals and flag dropped at {0}", payload.ToUpper()));
                 return true;
             }
 
