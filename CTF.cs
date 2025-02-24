@@ -243,9 +243,10 @@ namespace InfServer.Script.GameType_CTF
         private long secondOvertimeStart = 0;
         private bool isSecondOvertime = false;
 
-        private bool isChampEnabled = false;
+        private bool isChampEnabled = true;
 
         private int secondOvertimeTimer;
+        private Dictionary<Player, bool> disallowClassChange = new Dictionary<Player, bool>();
 
         private class Base
         {
@@ -427,10 +428,12 @@ private class PlayerState
     public long DeathTime { get; set; }
     public bool IsOnVehicle { get; set; } // Track if the player was on a vehicle
     public int VehicleId { get; set; } // Track the vehicle ID
+    public string Skill { get; set; } // Added property to store player's skill
 
     public PlayerState()
     {
         ItemCounts = new Dictionary<string, int>();
+        Skill = "";
     }
 }
 
@@ -453,6 +456,9 @@ private class VehicleState
 // Dictionary to store multiple saved game states
 // Key: state name, Value: Dictionary of player states
 private Dictionary<string, Dictionary<string, PlayerState>> savedGameStates = new Dictionary<string, Dictionary<string, PlayerState>>();
+// Dictionary to store multiple saved flag states
+// Key: state name, Value: Dictionary of flag states
+private Dictionary<string, Dictionary<int, Arena.FlagState>> savedFlagStates = new Dictionary<string, Dictionary<int, Arena.FlagState>>();
 
 // Dictionary to store multiple saved vehicle states
 // Key: state name, Value: Dictionary of vehicle states
@@ -599,6 +605,27 @@ private void SaveState(string stateName)
     int respawnDelay = CFG.timing.enterDelay;
     Dictionary<string, PlayerState> stateDict = new Dictionary<string, PlayerState>();
     Dictionary<int, VehicleState> vehicleStateDict = new Dictionary<int, VehicleState>();
+    Dictionary<int, Arena.FlagState> flagStateDict = new Dictionary<int, Arena.FlagState>();
+
+    // Store all flag states
+    foreach (Arena.FlagState flag in arena._flags.Values)
+    {
+        if (flag == null)
+            continue;
+
+        // Create a deep copy of the flag state
+        Arena.FlagState flagCopy = new Arena.FlagState();
+        flagCopy.flag = flag.flag;
+        flagCopy.team = flag.team;
+        flagCopy.posX = flag.posX;
+        flagCopy.posY = flag.posY;
+        flagCopy.oldPosX = flag.oldPosX;
+        flagCopy.oldPosY = flag.oldPosY;
+        flagCopy.bActive = flag.bActive;
+        flagCopy.carrier = flag.carrier;
+
+        flagStateDict[flag.flag.GeneralData.Id] = flagCopy;
+    }
 
     foreach (Player player in arena.Players)
     {
@@ -617,7 +644,8 @@ private void SaveState(string stateName)
             Direction = (ushort)player._state.direction,
             DeathTime = player._deathTime,
             IsOnVehicle = player._occupiedVehicle != null,
-            VehicleId = player._occupiedVehicle != null ? player._occupiedVehicle._type.Id : -1
+            VehicleId = player._occupiedVehicle != null ? player._occupiedVehicle._type.Id : -1,
+            Skill = GetPrimarySkillName(player)
         };
 
         if (player.IsDead)
@@ -671,6 +699,7 @@ private void SaveState(string stateName)
     // Store the state dictionaries under the provided state name
     savedGameStates[stateName] = stateDict;
     savedVehicleStates[stateName] = vehicleStateDict;
+    savedFlagStates[stateName] = flagStateDict;
     if (stateName == "0:00")
     {
         arena.sendArenaMessage("Game states will auto-save every 30 seconds (e.g. 0:00, 0:30, 1:00, 1:30, etc)");
@@ -697,6 +726,29 @@ private void LoadState(string stateName)
 
     Dictionary<string, PlayerState> savedGameState = savedGameStates[stateName];
     Dictionary<int, VehicleState> savedVehicleState = savedVehicleStates[stateName];
+    Dictionary<int, Arena.FlagState> savedFlagState = savedFlagStates[stateName];
+
+    // Load all flag states
+    foreach (var kvp in savedFlagState)
+    {
+        int flagId = kvp.Key;
+        Arena.FlagState savedFlag = kvp.Value;
+        Arena.FlagState currentFlag = arena._flags.Values.FirstOrDefault(f => f.flag.GeneralData.Id == flagId);
+        
+        if (currentFlag != null)
+        {
+            currentFlag.team = savedFlag.team;
+            currentFlag.posX = savedFlag.posX;
+            currentFlag.posY = savedFlag.posY;
+            currentFlag.oldPosX = savedFlag.oldPosX;
+            currentFlag.oldPosY = savedFlag.oldPosY;
+            currentFlag.bActive = savedFlag.bActive;
+            currentFlag.carrier = savedFlag.carrier;
+
+            // Update flag visually for all players
+            Helpers.Object_Flags(arena.Players, currentFlag);
+        }
+    }
 
     foreach (Player player in arena.Players)
     {
@@ -720,6 +772,7 @@ private void LoadState(string stateName)
             health = state.Health,
             direction = (Helpers.ObjectState.Direction)state.Direction
         };
+        ChangePlayerSkill(player, state.Skill);
         player.resetWarp();
         player.resetState(false, false, false);
 
@@ -973,14 +1026,12 @@ private void LoadState(string stateName)
                 player.setDefaultVehicle(AssetManager.Manager.getVehicleByID(newSkill.DefaultVehicleId));
             }
 
-            // Clear existing skills
             player._skills.Clear();
 
             // Create a new SkillItem and set its properties
             Player.SkillItem newSkillItem = new Player.SkillItem
             {
                 skill = newSkill
-                // No need to set skillID or quantity if not applicable
             };
 
             // Add the new skill to the player's skills
@@ -990,7 +1041,7 @@ private void LoadState(string stateName)
             player.syncState();
 
             // Notify the player that the skill has been changed
-            player.sendMessage(0, string.Format("Your skill has been changed to {0}.", skillName));
+            //player.sendMessage(0, string.Format("Your skill has been changed to {0}.", skillName));
         }
 
         // Method to update death count and take action
@@ -1024,7 +1075,6 @@ private void LoadState(string stateName)
 
             foreach (int itemID in itemsToDeprive)
             {
-
                 if (applySkillExceptions)
                 {
                     if ((playerSkill == "Combat Engineer" && itemID == 2009) ||
@@ -1046,16 +1096,24 @@ private void LoadState(string stateName)
                 }
             }
 
-            if (deprivedItems.Count > 0 && showMessage)
+            if (showMessage)
             {
-                string itemsList = string.Join(", ", deprivedItems);
-                arena.sendArenaMessage(string.Format("*{0} deprized {1}.", player._alias, itemsList));
+                if (deprivedItems.Count > 0)
+                {
+                    string itemsList = string.Join(", ", deprivedItems);
+                    arena.sendArenaMessage(string.Format("*{0} deprized {1}.", player._alias, itemsList));
+                }
+                else
+                {
+                    //player.sendMessage(0, "No players had minerals or premades to deprize.");
+                }
             }
         }
 
         private void CheckArenaItemProfile(Player sender)
         {
             HashSet<int> itemsToCheck = new HashSet<int> { 2005, 2007, 2009, 2, 9, 10, 11 };
+            bool anyFound = false;
 
             foreach (Player p in arena.Players)
             {
@@ -1076,9 +1134,15 @@ private void LoadState(string stateName)
 
                 if (itemCounts.Count > 0)
                 {
+                    anyFound = true;
                     string itemsList = string.Join(", ", itemCounts);
                     sender.sendMessage(0, string.Format("Player {0} has: {1}", p._alias, itemsList));
                 }
+            }
+            
+            if (!anyFound)
+            {
+                sender.sendMessage(0, "No minerals or premades were found on any players.");
             }
         }
 
@@ -1174,20 +1238,17 @@ private void LoadState(string stateName)
                 return;
             }
 
-            // Define mine conversion mappings
-            Dictionary<string, int> mineConversions = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+            // Get the conversion mapping for the player's champion group.
+            Dictionary<string, int> conversions = GetChampionConversionsForPlayer(player);
+            if (conversions == null)
             {
-                { "Grapeshot Mine", 1276 },
-                { "AP Mine", 1274 },
-                { "Plasma Mine", 1275 },
-                { "Micro Missile Launcher", 3065 },
-                { "Tranq", 1264 },
-                { "Kuchler A6 CAW", 3069 },
-            };
+                player.sendMessage(0, "No champion item conversion available for you.");
+                return;
+            }
 
             // Create a list of items to process to avoid modifying collection during enumeration
             var itemsToProcess = player._inventory.Values
-                .Where(entry => mineConversions.ContainsKey(entry.item.name))
+                .Where(entry => conversions.ContainsKey(entry.item.name))
                 .ToList();
 
             // Process each item that needs conversion
@@ -1197,29 +1258,80 @@ private void LoadState(string stateName)
                 int quantity = inventoryEntry.quantity;
 
                 // Get the new item ID for this mine type
-                int newItemId = mineConversions[itemName];
+                int newItemId = conversions[itemName];
 
-                // Remove old mines first
+                if (itemName.Equals("SiG Arms m2 AS", StringComparison.OrdinalIgnoreCase) &&
+                    player._alias.Equals("anjro", StringComparison.OrdinalIgnoreCase))
+                {
+                    newItemId = 3073;
+                }
+
+                // Remove old item first
                 player.inventoryModify(false, inventoryEntry.item, -quantity);
 
-                // Add converted mines
+                // Add converted item
                 ItemInfo newItem = AssetManager.Manager.getItemByID(newItemId);
                 if (newItem != null)
                 {
                     player.inventoryModify(newItem, quantity);
-                    player.sendMessage(0, string.Format("Converted {0} x{1} to {2}", itemName, quantity, newItem.name));
+                    player.sendMessage(0, string.Format("Item converted to champ item: {0} x{1} to {2}", itemName, quantity, newItem.name));
                 }
             }
         }
-        // CTFDL Season 2 Champions list
-        private static readonly string[] s2Champs = new[] {
-            "Axidus","bonds", "Colossal", "gamefreek321", "Half Cut", "juetnihilia", "kal",
-            "MysticGohan~", "Nos", "Pistor", "Rue", "S", "stoink", "Tactical", "Verb", 
+        
+        #region Champion Group Definitions
+
+        // Season 2 Champions & their item conversion mappings
+        private static readonly string[] s2Champs = new[]
+        {
+            "bonds", "Colossal", "gamefreek321", "Half Cut", "juetnihilia", "kal",
+            "MysticGohan~", "Nos", "Pistor", "Rue", "S", "Sov", "stoink", "Tactical", "Verb", 
             "victim", "yosh", "Zmn"
         };
 
+        private static readonly Dictionary<string, int> s2Conversions = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "Grapeshot Mine", 1276 },
+            { "AP Mine", 1274 },
+            { "Plasma Mine", 1275 },
+            { "Micro Missile Launcher", 3065 },
+            { "Tranq", 1264 },
+            { "Kuchler A6 CAW", 3069 },
+            { "Needler", 1312 },
+        };
+
+        // OVDL1 Champions & their item conversion mappings
+        private static readonly string[] ovdl1Champs = new[]
+        {
+            "Angelus", "Herthbul", "Designer", "albert", "Ruler", "grump", "NewJack", "anjro", "CTF[Ref] Designer", "Joe"
+        };
+
+        private static readonly Dictionary<string, int> ovdl1Conversions = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+        {
+            { "SiG Arms m2 AS", 3072 },
+            { "Mini Missile Launcher", 3081 },
+            { "Micro Missile Launcher", 3079 },
+            { "Maklov AC mk2", 3080 },
+            { "Kuchler A6 CAW", 3071 },
+        };
+
+        #endregion
+
         // Dictionary to store player preferences for automatic conversion
         private Dictionary<Player, bool> _autoConvertEnabled = new Dictionary<Player, bool>();
+
+        /// <summary>
+        /// Returns the item conversion dictionary for the champion group the player belongs to.
+        /// Returns null if the player isn’t in any champion group.
+        /// </summary>
+        private Dictionary<string, int> GetChampionConversionsForPlayer(Player player)
+        {
+            if (s2Champs.Any(alias => alias.Equals(player._alias, StringComparison.OrdinalIgnoreCase)))
+                return s2Conversions;
+            if (ovdl1Champs.Any(alias => alias.Equals(player._alias, StringComparison.OrdinalIgnoreCase)))
+                return ovdl1Conversions;
+            return null;
+        }
 
         /// <summary>
         /// Triggered when a player buys from either shop or ?buy
@@ -1227,15 +1339,20 @@ private void LoadState(string stateName)
         [Scripts.Event("Shop.Buy")]
         public bool PlayerShop(Player from, ItemInfo item, int quantity)
         {
-            // Check if player has auto-convert enabled and is authorized
-            if (s2Champs.Any(alias => alias.Equals(from._alias, StringComparison.OrdinalIgnoreCase)))
+            // Check if the player belongs to any champion group.
+            Dictionary<string, int> conversions = GetChampionConversionsForPlayer(from);
+            // debug print conversions
+            //arena.sendArenaMessage("Conversions: " + conversions);
+            if (conversions != null)
+
             {
-                if (_autoConvertEnabled.ContainsKey(from) && _autoConvertEnabled[from])
+                // arena debug message
+                //arena.sendArenaMessage("Player " + from._alias + " is in a champion group, checking auto-convert flag.");
+                bool autoEnabled = false;
+                // Only process conversion if the player's auto-convert flag exists and is true.
+                if (_autoConvertEnabled.TryGetValue(from, out autoEnabled) && autoEnabled && isChampEnabled)
                 {
-                    //debug message
-                    from.sendMessage(0, "Auto-convert is enabled for you, processing Champ items.");
-                    // Add a small delay before converting items
-                    System.Threading.Thread.Sleep(500);
+                    from.sendMessage(0, "Auto-convert is enabled for you, processing champion items.");
                     ConvertChampItems(from);
                 }
             }
@@ -1247,18 +1364,19 @@ private void LoadState(string stateName)
         /// </summary>
         private void HandleChampCommand(Player player)
         {
-            // Check if player's alias is in the s2Champs list
-            if (!s2Champs.Any(alias => alias.Equals(player._alias, StringComparison.OrdinalIgnoreCase)))
+            // Verify that the player is in a champion group.
+            Dictionary<string, int> conversions = GetChampionConversionsForPlayer(player);
+            if (conversions == null)
             {
                 player.sendMessage(-1, "You are not authorized to use this command.");
                 return;
             }
 
-            // Toggle auto-convert state
+            // Toggle the auto-convert setting.
             if (_autoConvertEnabled.ContainsKey(player))
             {
                 _autoConvertEnabled[player] = !_autoConvertEnabled[player];
-                player.sendMessage(0, string.Format("Automatic item conversion has been {0}.", 
+                player.sendMessage(0, string.Format("Automatic item conversion has been {0}.",
                     _autoConvertEnabled[player] ? "enabled" : "disabled"));
             }
             else
@@ -1267,11 +1385,11 @@ private void LoadState(string stateName)
                 player.sendMessage(0, "Automatic item conversion has been enabled.");
             }
 
-            // Convert items immediately when enabled
-            if (_autoConvertEnabled[player])
+            // Immediately convert items if auto-convert was just enabled.
+            if (_autoConvertEnabled[player] && isChampEnabled)
             {
                 ConvertChampItems(player);
-                player.sendMessage(0, "Items converted to champion versions.");
+                //player.sendMessage(0, "Items converted to champion versions.");
             }
         }
 
@@ -1488,6 +1606,9 @@ public bool InitializeSUTEvent()
     // Assign teams using our new system
     AssignTeamsForSUT(activePlayers);
 
+    // Enable private teams and
+    allowPrivateTeams = true;
+
     // Set victory conditions
     arena.sendArenaMessage("First team to 50 kills wins!");
     
@@ -1564,25 +1685,25 @@ private void AssignTeamsForSUT(List<Player> players)
         }
     }
 
-    // Announce team assignments
-    arena.sendArenaMessage("&Teams have been assigned!");
+    // // Announce team assignments
+    // arena.sendArenaMessage("&Teams have been assigned!");
     
-    // Display team compositions
-    for (int i = 0; i < teams.Count; i++)
-    {
-        var teamPlayers = teams[i];
-        if (teamPlayers.Count == 0) continue;
+    // // Display team compositions
+    // for (int i = 0; i < teams.Count; i++)
+    // {
+    //     var teamPlayers = teams[i];
+    //     if (teamPlayers.Count == 0) continue;
 
-        string teamName = teamPlayers[0]._alias.Length <= 10 
-            ? string.Format("{0} {1}", teamPlayers[0]._alias, suffixes[rand.Next(suffixes.Length)])
-            : string.Format("Team {0}", suffixes[rand.Next(suffixes.Length)]);
+    //     string teamName = teamPlayers[0]._alias.Length <= 10 
+    //         ? string.Format("{0} {1}", teamPlayers[0]._alias, suffixes[rand.Next(suffixes.Length)])
+    //         : string.Format("Team {0}", suffixes[rand.Next(suffixes.Length)]);
 
-        arena.sendArenaMessage(string.Format("~{0}: {1}/3 players", teamName, teamPlayers.Count));
-        foreach (var player in teamPlayers)
-        {
-            arena.sendArenaMessage(string.Format("   {0} ({1})", player._alias, GetPrimarySkillName(player)));
-        }
-    }
+    //     arena.sendArenaMessage(string.Format("~{0}: {1}/3 players", teamName, teamPlayers.Count));
+    //     foreach (var player in teamPlayers)
+    //     {
+    //         arena.sendArenaMessage(string.Format("   {0} ({1})", player._alias, GetPrimarySkillName(player)));
+    //     }
+    // }
 }
 
 private bool CanSwitchTeamsDuringSUT(Player player, string targetTeamName)
@@ -3435,7 +3556,7 @@ private Player FindPlayerByAlias(string alias)
             /// </summary>
             /// <param name="player">The player issuing the command.</param>
             /// <param name="skillName">The input string after the ?swap command.</param>
-            public void HandleSwapCommand(Player player, string skillName, CfgInfo CFG)
+            public void HandleSwapCommand(Player player, string skillName, CfgInfo CFG, Script_CTF script)
             {
                 // Check if the player is on an occupied vehicle, if so don't allow them to swap
                 Vehicle occupiedVehicle = player._arena.Vehicles.FirstOrDefault(v => v._inhabitant == player);
@@ -3514,6 +3635,24 @@ private Player FindPlayerByAlias(string alias)
                     }
                 }
 
+                // Update play time for current skill before changing to new skill using inline logic to retrieve the primary skill info
+                SkillInfo currentSkill = null;
+                if (player._skills != null && player._skills.Count > 0)
+                {
+                    foreach (var skillItem in player._skills.Values)
+                    {
+                        currentSkill = skillItem.skill;
+                        break;
+                    }
+                }
+                // Update play time for current skill before changing to new skill
+                script.UpdateSkillPlayTime(player, currentSkill);
+                
+                // Update class swap count for player
+                if (!script.playerClassSwaps.ContainsKey(player))
+                    script.playerClassSwaps[player] = 0;
+                script.playerClassSwaps[player]++;
+
                 // Reset the player's inventory if the skill requires it
                 if (skill.ResetInventory)
                 {
@@ -3545,6 +3684,21 @@ private Player FindPlayerByAlias(string alias)
                 player._state.energy -= (short)energyNeeded; // Deduct and cast to short to match expected type
 
                 // Synchronize player state to reflect the new skill and vehicle
+                // Reset the players warp, but keep their position
+                Vehicle vehicle = player._occupiedVehicle ?? player._baseVehicle;
+                if (vehicle != null)
+                {
+                    vehicle._state.positionX = player._state.positionX;
+                    vehicle._state.positionY = player._state.positionY;
+                    vehicle._state.velocityX = 0;
+                    vehicle._state.velocityY = 0;
+                    vehicle._state.yaw = player._state.yaw;
+                    vehicle._state.direction = Helpers.ObjectState.Direction.None;
+                    vehicle._state.energy = 1000;
+                    vehicle._state.health = 1000;
+                    vehicle._tickDead = 0;
+                    vehicle.update(false);
+                }
                 player.syncState();
 
                 // Notify the player that the skill has been added and vehicle changed
@@ -3941,6 +4095,7 @@ private Player FindPlayerByAlias(string alias)
             }
             else
             {
+                _playerStatsEnabled = false;
                 foreach (Arena.FlagState fs in arena._flags.Values)
                 {
                     if (fs.flag.FlagData.MinPlayerCount == 0)
@@ -4008,6 +4163,7 @@ private Player FindPlayerByAlias(string alias)
 
             // Convert ?buy commands to a dictionary format
             buildSets = buildManager.ConvertBuyCommandsToDictionary(buildInputs);
+            currentEventType = (arena._name.Contains("Arena 1") || arena._name.Contains("Public1")) ? EventType.MiniTP : EventType.None;
 
             return true;
         }
@@ -4472,6 +4628,16 @@ private Player FindPlayerByAlias(string alias)
                         }
                     }
                 }
+                Dictionary<string, int> conversions = GetChampionConversionsForPlayer(player);
+                if (conversions != null)
+                {
+                    bool autoEnabled = false;
+                    if (_autoConvertEnabled.TryGetValue(player, out autoEnabled) && autoEnabled && isChampEnabled)
+                    {
+                        // Convert any eligible items in the player's inventory.
+                        ConvertChampItems(player);
+                    }
+                }
             }
             else
             {
@@ -4812,6 +4978,7 @@ private Player FindPlayerByAlias(string alias)
 
         // Dictionaries to track the last skill name, last announcement time, and to track if a player has ever been on a non-SPEC team for each player
         private Dictionary<Player, string> playerLastSkillNames = new Dictionary<Player, string>();
+        
         private Dictionary<Player, DateTime> lastAnnouncementTimes = new Dictionary<Player, DateTime>();
         Dictionary<Player, bool> playerHasPlayed = new Dictionary<Player, bool>();
 
@@ -4874,6 +5041,14 @@ private Player FindPlayerByAlias(string alias)
             {
                 foreach (Player player in arena.Players)
                 {
+                    // Initialize tracking for new players if needed
+                    if (!player.IsSpectator && !playerClassPlayTimes.ContainsKey(player))
+                    {
+                        playerClassPlayTimes[player] = new Dictionary<string, int>();
+                        playerLastClassSwitch[player] = Environment.TickCount;
+                        playerClassSwaps[player] = 0;
+                    }
+
                     // We need to get the current skill name from the player's skills dictionary
                     string currentSkillName = GetPrimarySkillName(player);
 
@@ -4915,6 +5090,13 @@ private Player FindPlayerByAlias(string alias)
                                 } else {
                                     arena.sendArenaMessage("#CLOAKERS ------ TEAM " + currentTeamName + " ------ " + player._alias + ".", 14);
                                 }
+
+                                // Send another arena message 5 times every 1 second
+                                // for (int i = 0; i < 5; i++)
+                                // {
+                                //     arena.sendArenaMessage("#HEY YOU AUTISTIC FUCK, TURN YOUR ES ON", 3);
+                                //     System.Threading.Thread.Sleep(1000);
+                                // }
 
                                 // Update the last announcement time for the player
                                 lastAnnouncementTimes[player] = DateTime.Now;
@@ -5133,7 +5315,7 @@ private Player FindPlayerByAlias(string alias)
                 }
             }
 
-            foreach (var player in arena.PlayersIngame) // Assuming PlayersIngame gives all players in the arena
+            foreach (var player in arena.PlayersIngame)
             {
                 if (script.currentEventType == EventType.MiniTP){
                     Player playerCopy = player; // Create a copy to use in timer callback
@@ -5155,7 +5337,6 @@ private Player FindPlayerByAlias(string alias)
                 arena.sendArenaMessage("Teams have been scrambled between " + teamsToScramble[0]._name + " and " + teamsToScramble[1]._name + "!");
             }
         }
-
 
         private bool SpawnMapPlayers()
         {
@@ -5457,12 +5638,82 @@ private Player FindPlayerByAlias(string alias)
             return true;
         }
 
+        // mined stat dictionary that holds list of teams and the count of TSO and TOX mined
+        private Dictionary<string, int> minedStats = new Dictionary<string, int>();
+
+        // Add stat method for tracking per team and per item type ("Tso" for 2005, "Tox" for 2009)
+        private void AddStat(int itemId, int quantity, string teamName)
+        {
+            // Build the key based on item id: 2005 -> "Tso mined", 2009 -> "Tox mined"
+            string key = (itemId == 2005) ? teamName + " Tso mined" : teamName + " Tox mined";
+            if (!minedStats.ContainsKey(key))
+                minedStats[key] = 0;
+            minedStats[key] += quantity;
+        }
+
+        /// <summary>
+        /// Triggered when a player requests to pick up an item
+        /// </summary>
+        [Scripts.Event("Player.ItemPickup")]
+        public bool playerItemPickup(Player player, Arena.ItemDrop drop, ushort quantity)
+        {
+            var itemId = drop.item.id;
+            var itemName = drop.item.name;
+
+            // For item IDs 2005 (Tso) or 2009 (Tox), update the team's stat accordingly.
+            if ((itemId == 2005 || itemId == 2009) && quantity == 5)
+            {
+                int terrainID = player._arena.getTerrainID(player._state.positionX, player._state.positionY);
+                if (terrainID == 0 && (player._team._name.Contains("Titan") || player._team._name.Contains("Collective")))
+                {
+                    AddStat(itemId, quantity, player._team._name);
+                    //arena.sendArenaMessage(string.Format("{0} has mined 5 {1}!", player._alias, itemName));
+                }
+            }
+
+            // If tranq is picked up, and player has Subzero (Tranq) item, give them the Subzero (tranq) item instead (ID 1264)
+            if (drop.item.id == 1113 && player._inventory.ContainsKey(1312))
+            {
+                player.inventoryModify(1264, quantity);
+                player.sendMessage(0, "You have been given the Subzero (Tranq) item!");
+                // destroy drop from arena
+                player._arena._items.Remove(drop.id);
+                Helpers.Object_ItemDropUpdate(player._arena.Players, (ushort)drop.item.id, (ushort)0);
+                return false;
+            }
+            return true;
+        }
+
         /// <summary>
         /// Triggered when a player attempts to use a warp item
         /// </summary>
+        private Dictionary<ushort, int> summonedCounts = new Dictionary<ushort, int>();
+
         [Scripts.Event("Player.WarpItem")]
         public bool playerWarpItem(Player player, ItemInfo.WarpItem item, ushort targetPlayerID, short posX, short posY)
         {
+            // if (item.warpMode == Assets.ItemInfo.WarpItem.WarpMode.Portal)
+            // {
+
+            // }
+
+            // GetPrimarySkillName and if Combat Engineer, update computers send update
+            if (GetPrimarySkillName(player) == "Combat Engineer" || 
+                (arena.getPlayerById(targetPlayerID) != null && GetPrimarySkillName(arena.getPlayerById(targetPlayerID)) == "Combat Engineer"))
+            {
+                foreach (Vehicle v in arena.Vehicles)
+                {
+                    if (v is Computer)
+                    {
+                        Computer comp = (Computer)v;
+                        comp._sendUpdate = true;
+                        comp.poll();
+                    }
+                }
+                // debug message to the player that they're receiving an update on turret hp
+                player.sendMessage(0, "Debug: Updating turret hp for player client.");
+            }
+
             // Redirect DropShip Recall for CTFX Event
             if (currentEventType == EventType.CTFX && item.id == 46){
                 WarpPlayerToRange(player, 985, 997, 1117, 1129, 0);
@@ -5483,6 +5734,11 @@ private Player FindPlayerByAlias(string alias)
             var flag = arena.getFlag("Bridge3");
             // Send a message to the arena that they have been summoned if they're carrying a flag
             if (item.id == 35){
+                // Track summoned count for target player
+                if (!summonedCounts.ContainsKey(targetPlayerID))
+                    summonedCounts[targetPlayerID] = 0;
+                summonedCounts[targetPlayerID]++;
+
                 // If the target player is not within 100 units on X axis after summoning, refund the energy cost
                 Player targetPlayer = arena.Players.FirstOrDefault(p => p._id == targetPlayerID);
                 if (targetPlayer != null)
@@ -5511,7 +5767,7 @@ private Player FindPlayerByAlias(string alias)
                     if (targetPlayer != null) {
                         if (flag != null && flag.carrier == targetPlayer && baseUsed != "Unknown" && winningTeamOVD != "offense"){
                             arena.sendArenaMessage(string.Format("Offense wins! {0} has been summoned with a flag!", targetPlayer._alias));
-                            winningTeamOVD = "offense"; // Set winning team to offense when flag carrier is summoned
+                            winningTeamOVD = "offense";
                         }
                     }
                 }
@@ -5525,7 +5781,7 @@ private Player FindPlayerByAlias(string alias)
 
                 if (hasSquadLeader && flag != null && flag.carrier == player && baseUsed != "Unknown" && winningTeamOVD != "offense"){
                     arena.sendArenaMessage(string.Format("Offense wins! {0} has warped with a flag!", player._alias));
-                    winningTeamOVD = "offense"; // Set winning team to offense when player has warped with a flag
+                    winningTeamOVD = "offense";
                 }
             }
 
@@ -5563,10 +5819,19 @@ private Player FindPlayerByAlias(string alias)
             //  arena.sendArenaMessage(string.Format("Player {0} spawned. Death: {1}, Event Type: {2}", 
             //      player._alias, bDeath, currentEventType));
 
+            //If player skill is Dueler, reset their warp only.
+            if (player._skills.Values.Any(s => s.skill.Name == "Dueler")){
+                WarpPlayerToRange(player, 756, 756, 536, 536, 1000);
+                return true;
+            }
 
-            if (currentEventType == EventType.CTFX){
+            if (currentEventType == EventType.CTFX || currentEventType == EventType.SUT){
                 player.resetWarp();
-                WarpPlayerToRange(player, 985, 997, 1117, 1129, 1000);
+                if (currentEventType == EventType.CTFX){
+                    WarpPlayerToRange(player, 985, 997, 1117, 1129, 1000);
+                } else {
+                    WarpPlayerToRange(player, 679, 686, 608, 618, 1000);
+                }
                 //arena.sendArenaMessage(string.Format("CTFX: Warping {0} to range (985-997, 1117-1129)", player._alias));
                 player.Bounty = CFG.bounty.start;
                 player.syncState();
@@ -5574,12 +5839,6 @@ private Player FindPlayerByAlias(string alias)
             }
 
             if (currentEventType == EventType.MiniTP){
-                // If player skill is Dueler, reset their warp only.
-                if (player._skills.Values.Any(s => s.skill.Name == "Dueler")){
-                    player.resetWarp();
-                    WarpPlayerToRange(player, 756, 756, 536, 536, 1000);
-                    return true;
-                }
                 player.resetWarp();
                 if (player._team._name.Contains("Titan")) {
                     WarpPlayerToRange(player, 654, 654, 518, 518, 1000);
@@ -5620,6 +5879,55 @@ private Player FindPlayerByAlias(string alias)
 
             return true;
         }
+        // Dictionary to track class play times for each player
+        private Dictionary<Player, Dictionary<string, int>> playerClassPlayTimes = new Dictionary<Player, Dictionary<string, int>>();
+        
+        // Dictionary to track when each player last switched classes
+        private Dictionary<Player, int> playerLastClassSwitch = new Dictionary<Player, int>();
+
+        /// <summary>
+        /// Sends ordered class play time messages to the player
+        /// </summary>
+        private void SendOrderedPlayTimes(Player player)
+        {
+            if (!playerClassPlayTimes.ContainsKey(player))
+                return;
+
+            // Get current time to calculate current class time
+            int currentTick = Environment.TickCount;
+            var playTimes = new Dictionary<string, int>(playerClassPlayTimes[player]);
+
+            // Add time for current class if player has one
+            string currentSkill = player._skills.Count > 0 ? player._skills.First().Value.skill.Name : null;
+            if (currentSkill != null)
+            {
+                int sessionTime = Math.Max(0, currentTick - playerLastClassSwitch[player]);
+                if (!playTimes.ContainsKey(currentSkill))
+                    playTimes[currentSkill] = 0;
+                playTimes[currentSkill] += sessionTime;
+            }
+
+            // Order play times from highest to lowest
+            var orderedTimes = playTimes
+                .OrderByDescending(x => x.Value)
+                .ToList();
+
+            // Calculate total time
+            double totalSeconds = orderedTimes.Sum(x => x.Value) / 1000.0;
+
+            // Send header message
+            player.sendMessage(-1, string.Format("&Total Time: {0:F1} seconds | Class Swaps: {1}", totalSeconds, playerClassSwaps[player]));
+
+            // Send individual class times
+            foreach (var entry in orderedTimes)
+            {
+                double seconds = entry.Value / 1000.0;
+                player.sendMessage(0, string.Format("*{0}: {1:F1} seconds", entry.Key, seconds));
+            }
+        }
+
+        // Dictionary to track class swaps for each player
+        private Dictionary<Player, int> playerClassSwaps = new Dictionary<Player, int>();
 
         /// <summary>
         /// Triggered when a player's purchase is successful
@@ -5627,6 +5935,28 @@ private Player FindPlayerByAlias(string alias)
         [Scripts.Event("Shop.SkillPurchase")]
         public bool PlayerShopSkillPurchase(Player from, SkillInfo skill)
         {
+            Vehicle vehicle = from._occupiedVehicle ?? from._baseVehicle;
+            if (vehicle != null)
+            {
+                vehicle._state.positionX = from._state.positionX;
+                vehicle._state.positionY = from._state.positionY;
+                vehicle._state.velocityX = 0;
+                vehicle._state.velocityY = 0;
+                vehicle._state.yaw = from._state.yaw;
+                vehicle._state.direction = Helpers.ObjectState.Direction.None;
+                vehicle._state.energy = 1000;
+                vehicle._state.health = 1000;
+                vehicle._tickDead = 0;
+                vehicle.update(false);
+            }
+            
+            from.warp(Helpers.ResetFlags.ResetAll, from._state, from._state.health, from._state.energy, (byte)from._state.yaw);
+            
+            // Update class swap count for player
+            if (!playerClassSwaps.ContainsKey(from))
+                playerClassSwaps[from] = 0;
+            playerClassSwaps[from]++;
+
             if (currentEventType == EventType.CTFX){
                 WarpPlayerToRange(from, 985, 997, 1117, 1129);
                 return false;
@@ -5640,27 +5970,80 @@ private Player FindPlayerByAlias(string alias)
             }
             return true;
         }
+        /// <summary>
+        /// Updates the play time tracking for a player's skill
+        /// </summary>
+        private void UpdateSkillPlayTime(Player player, SkillInfo newSkill = null)
+        {
+            // Don't update play time for spectators (either on spec team or in spec vehicle)
+            if (player._team.IsSpec || (player._baseVehicle != null && player._baseVehicle._type.Name.Contains("Spectator")))
+                return;
+
+            // Initialize tracking for new players
+            if (!playerClassPlayTimes.ContainsKey(player))
+            {
+                playerClassPlayTimes[player] = new Dictionary<string, int>();
+                playerLastClassSwitch[player] = Environment.TickCount;
+            }
+
+            // Get current time
+            int currentTick = Environment.TickCount;
+
+            // Get current skill name if it exists
+            string currentSkill = player._skills.Count > 0 ? player._skills.First().Value.skill.Name : null;
+
+            if (currentSkill != null)
+            {
+                // Calculate time played in current session
+                int startTime = playerLastClassSwitch[player];
+                int sessionPlayTime = Math.Max(0, currentTick - startTime); // Ensure non-negative
+
+                // Add session time to accumulated time for current skill
+                if (!playerClassPlayTimes[player].ContainsKey(currentSkill))
+                {
+                    playerClassPlayTimes[player][currentSkill] = 0;
+                }
+                playerClassPlayTimes[player][currentSkill] += sessionPlayTime;
+
+                // Send message showing total accumulated play time in seconds
+                double totalSeconds = Math.Min(playerClassPlayTimes[player][currentSkill] / 1000.0,
+                    (currentTick - arena._tickGameStarted) / 1000.0); // Cap at game duration
+                // player.sendMessage(-1, string.Format("You played {0} for {1:F1} seconds", currentSkill, totalSeconds));
+                // player.sendMessage(-1, string.Format("You have swapped {0} times", playerClassSwaps[player]));
+            }
+
+            // Reset the last switch time for the new skill
+            playerLastClassSwitch[player] = currentTick;
+
+            // Initialize play time for new skill if provided and not exists
+            if (newSkill != null && !playerClassPlayTimes[player].ContainsKey(newSkill.Name))
+            {
+                playerClassPlayTimes[player][newSkill.Name] = 0;
+            }
+        }
 
         /// <summary>
         /// Triggered when a player requests to buy a skill
         /// </summary>
         [Scripts.Event("Shop.SkillRequest")]
         public bool PlayerShopSkillRequest(Player from, SkillInfo skill)
-        {
-            //arena.sendArenaMessage(string.Format("Player {0} requested to buy skill {1}.", from._alias, skillName));
-                if (skill.Name == "Infiltrator" && !from._arena._name.Contains("Arena 1") && !from._arena._name.Contains("Public1"))
-                {
-                    // Count infiltrators only on the player's team
-                    int teamInfiltratorCount = arena.Players
-                        .Where(p => p._team == from._team && !p._team.IsSpec && p._skills.Any(s => s.Value.skill.Name == "Infiltrator"))
-                        .Count();
+        {            
+            UpdateSkillPlayTime(from, skill);
 
-                    if (teamInfiltratorCount >= 2)
-                    {
-                        from.sendMessage(-1, "Infiltrator skill purchase not allowed due to 2 infils on the team already.");
-                        return false;
-                    }
+            //arena.sendArenaMessage(string.Format("Player {0} requested to buy skill {1}.", from._alias, skillName));
+            if (skill.Name == "Infiltrator" && !from._arena._name.Contains("Arena 1") && !from._arena._name.Contains("Public1"))
+            {
+                // Count infiltrators only on the player's team
+                int teamInfiltratorCount = arena.Players
+                    .Where(p => p._team == from._team && !p._team.IsSpec && p._skills.Any(s => s.Value.skill.Name == "Infiltrator"))
+                    .Count();
+
+                if (teamInfiltratorCount >= 2)
+                {
+                    from.sendMessage(-1, "Infiltrator skill purchase not allowed due to 2 infils on the team already.");
+                    return false;
                 }
+            }
             return true;
         }
         // Properties to store portal redirect settings
@@ -5673,16 +6056,81 @@ private Player FindPlayerByAlias(string alias)
         [Scripts.Event("Player.Portal")]
         public bool playerPortal(Player player, LioInfo.Portal portal)
         {
+            // Check if the player's arena and event type are valid
+            if (currentEventType == EventType.MiniTP)
+            {
+                // Replace 'desiredPortalID' with the specific portal ID you want to check
+                ushort[] desiredPortalIDs = { 66, 67 }; // Titan DropShip portals
+
+                // Check if the portal used is one of the ones we want to redirect
+                if (desiredPortalIDs.Any(id => id == portal.PortalData.DestinationWarpGroup))
+                {
+                        if (player._team._name.Contains("Titan")) {
+                            WarpPlayerToRange(player, 654, 654, 518, 518);
+                        }
+                        else if (player._team._name.Contains("Collective")) {
+                        WarpPlayerToRange(player, 648, 648, 565, 565);
+                    }
+                    return false;
+                }
+            }
+
+            // Check if the player's arena and event type are valid
+            if (currentEventType == EventType.CTFX)
+            {
+                // Replace 'desiredPortalID' with the specific portal ID you want to check
+                ushort[] desiredPortalIDs = { 66, 67 }; // Titan DropShip portals
+
+                // Check if the portal used is one of the ones we want to redirect
+                if (desiredPortalIDs.Any(id => id == portal.PortalData.DestinationWarpGroup))
+                {
+                    // Define the target position within the same arena
+                    Helpers.ObjectState targetPosition = new Helpers.ObjectState();
+                    targetPosition.positionX = 502; // Replace with desired X coordinate
+                    targetPosition.positionY = 1422; // Replace with desired Y coordinate
+                    targetPosition.positionZ = 0;    // Z coordinate, if applicable
+                    targetPosition.yaw = 0;          // Facing direction, if applicable
+
+                    // Warp the player to the new position
+                    player.warp(targetPosition.positionX * 16, targetPosition.positionY * 16);
+                    //WarpPlayerToExactLocation(player, targetPosition.positionX, targetPosition.positionY);
+
+                    // Send a message to the player indicating they used a portal
+                    player.sendMessage(0, "You have been redirected through a special portal!");
+
+                    // Return false to prevent the default portal handling
+                    return false;
+                }
+            }
+            // Check if the player's arena and event type are valid
+            if (currentEventType == EventType.SUT)
+            {
+                // Replace 'desiredPortalID' with the specific portal ID you want to check
+                ushort[] desiredPortalIDs = { 66, 67 }; // Titan DropShip portals
+
+                // Check if the portal used is one of the ones we want to redirect
+                if (desiredPortalIDs.Any(id => id == portal.PortalData.DestinationWarpGroup))
+                {
+                    int totalPlayers = arena.PlayersIngame.Count();
+
+                    if (totalPlayers < 10)
+                        WarpPlayerToRange(player, 1180, 1270, 145, 240);
+
+                    if (totalPlayers >= 10 && totalPlayers <= 29)
+                        WarpPlayerToRange(player, 1180, 1400, 145, 270);
+
+                    if (totalPlayers >= 30)
+                        WarpPlayerToRange(player, 1070, 1540, 60, 310);
+
+                    // Send a message to the player indicating they used a portal
+                    //player.sendMessage(0, "You have been redirected to Small Unit Tactics!");
+
+                    // Return false to prevent the default portal handling
+                    return false;
+                }
+            }
             //arena debug message using string.format stating the portal.id
             //arena.sendArenaMessage(string.Format("Portal ID: {0}", portal.PortalData.DestinationWarpGroup));
-            
-            // Ensure the player and portal objects are valid
-            if (player == null || portal == null)
-                return true; // Proceed with default handling if objects are null
-
-            // Only process redirects if a redirect has been set
-            if (redirectSide == null || redirectBase == null)
-                return true;
 
             // Handle portal redirects based on base locations using value tuples with named elements
             bool isTitanPortal = new[] { 18, 201 }.Contains(portal.PortalData.DestinationWarpGroup);
@@ -5782,79 +6230,6 @@ private Player FindPlayerByAlias(string alias)
                 }
             }
 
-            // Check if the player's arena and event type are valid
-            if (currentEventType == EventType.MiniTP)
-            {
-                // Replace 'desiredPortalID' with the specific portal ID you want to check
-                ushort[] desiredPortalIDs = { 66, 67 }; // Titan DropShip portals
-
-                // Check if the portal used is one of the ones we want to redirect
-                if (desiredPortalIDs.Any(id => id == portal.PortalData.DestinationWarpGroup))
-                {
-                        if (player._team._name.Contains("Titan")) {
-                            WarpPlayerToRange(player, 654, 654, 518, 518);
-                        }
-                        else if (player._team._name.Contains("Collective")) {
-                        WarpPlayerToRange(player, 648, 648, 565, 565);
-                    }
-                }
-                return false;
-            }
-
-            // Check if the player's arena and event type are valid
-            if (currentEventType == EventType.CTFX)
-            {
-                // Replace 'desiredPortalID' with the specific portal ID you want to check
-                ushort[] desiredPortalIDs = { 66, 67 }; // Titan DropShip portals
-
-                // Check if the portal used is one of the ones we want to redirect
-                if (desiredPortalIDs.Any(id => id == portal.PortalData.DestinationWarpGroup))
-                {
-                    // Define the target position within the same arena
-                    Helpers.ObjectState targetPosition = new Helpers.ObjectState();
-                    targetPosition.positionX = 502; // Replace with desired X coordinate
-                    targetPosition.positionY = 1422; // Replace with desired Y coordinate
-                    targetPosition.positionZ = 0;    // Z coordinate, if applicable
-                    targetPosition.yaw = 0;          // Facing direction, if applicable
-
-                    // Warp the player to the new position
-                    player.warp(targetPosition.positionX * 16, targetPosition.positionY * 16);
-                    //WarpPlayerToExactLocation(player, targetPosition.positionX, targetPosition.positionY);
-
-                    // Send a message to the player indicating they used a portal
-                    player.sendMessage(0, "You have been redirected through a special portal!");
-
-                    // Return false to prevent the default portal handling
-                    return false;
-                }
-            }
-            // Check if the player's arena and event type are valid
-            if (currentEventType == EventType.SUT)
-            {
-                // Replace 'desiredPortalID' with the specific portal ID you want to check
-                ushort[] desiredPortalIDs = { 66, 67 }; // Titan DropShip portals
-
-                // Check if the portal used is one of the ones we want to redirect
-                if (desiredPortalIDs.Any(id => id == portal.PortalData.DestinationWarpGroup))
-                {
-                    int totalPlayers = arena.PlayersIngame.Count();
-
-                    if (totalPlayers < 10)
-                        WarpPlayerToRange(player, 1180, 1270, 145, 240);
-
-                    if (totalPlayers >= 10 && totalPlayers <= 29)
-                        WarpPlayerToRange(player, 1180, 1400, 145, 270);
-
-                    if (totalPlayers >= 30)
-                        WarpPlayerToRange(player, 1070, 1540, 60, 310);
-
-                    // Send a message to the player indicating they used a portal
-                    //player.sendMessage(0, "You have been redirected to Small Unit Tactics!");
-
-                    // Return false to prevent the default portal handling
-                    return false;
-                }
-            }
             // Proceed with the default portal handling
             return true;
         }
@@ -5863,30 +6238,29 @@ private Player FindPlayerByAlias(string alias)
         // Define the non-expiring item IDs
          HashSet<int> nonExpiringItemIDs = new HashSet<int> { 2005, 2007, 2009, 2, 9, 10, 11 };
 
-        // /// <summary>
-        // /// Triggered when a player requests to drop an item
-        // /// </summary>
+        /// <summary>
+        /// Triggered when a player requests to drop an item
+        /// </summary>
         // [Scripts.Event("Player.ItemDrop")]
-        // public bool playerItemDrop(Player player, ItemInfo item, int quantity)
+        // public bool playerItemDrop(Player player, ItemInfo item, object quantity)
         // {
-        //     // Get the current terrain ID
-        //     int terrainID = player._arena.getTerrainID(player._state.positionX, player._state.positionY);
+        //     // Convert quantity to an int regardless of whether it's a ushort or int.
+        //     int qty = Convert.ToInt32(quantity);
 
-        //     // Check if the item is in a specific terrain and not in the non-expiring list
-        //     if ((terrainID == 1 || terrainID == 2 || terrainID == 4 || terrainID == 7 || terrainID == 14) && !nonExpiringItemIDs.Contains(item.id))
+        //     // If on terrain 0, and it's 5 tso or tox (item ids 2005 and 2009), subtract 5 from minedStats.
+        //     if (player._arena.getTerrainID(player._state.positionX, player._state.positionY) == 0 &&
+        //     (item.id == 2005 || item.id == 2009))
         //     {
-        //         // Cancel the default item drop
-        //         // This prevents the game from dropping the item automatically
-        //         player.inventoryModify(item, -quantity);
-        //         //player.sendMessage(0, "Item drop cancelled due to terrain and non-expiring item conditions.");
-        //         return false; // Do not modify the inventory here if the drop command handles it
+        //         string key = (item.id == 2005)
+        //             ? player._team._name + " Tso mined"
+        //             : player._team._name + " Tox mined";
+        //         if (minedStats.ContainsKey(key))
+        //         {
+        //             minedStats[key] -= 5;
+        //         }
+        //         //player._arena.sendArenaMessage(string.Format("{0} has dropped 5 {1}!", player._alias, item.name));
         //     }
-        //     else
-        //     {
-        //         // Allow the default item drop to proceed
-        //         //player.sendMessage(0, "Item drop allowed to proceed.");
-        //         return true; // The drop command will handle the inventory modification
-        //     }
+        //     return true;
         // }
         
         [Scripts.Event("Player.Leave")]
@@ -5960,8 +6334,12 @@ private Player FindPlayerByAlias(string alias)
         public bool StartGame()
         {
 
+            if (arena._name.Contains("CTFDL") || arena._name.Contains("OVDL")){ // or OVDL1
+                // Disable champ item conversion for CTFDL or OVDL arenas
+                isChampEnabled = false;
+            }
+
             //Reset Flags
-            currentEventType = (arena._name.Contains("Arena 1") || arena._name.Contains("Public1")) ? EventType.MiniTP : EventType.None;
             if (currentEventType == EventType.MiniTP)
             {
                 InitializeMiniTPEvent();
@@ -5989,7 +6367,6 @@ private Player FindPlayerByAlias(string alias)
             List<Team> teamsWithPlayers = arena.Teams.Where(t => t.ActivePlayers.Count() > 0).ToList();
             Team team1 = teamsWithPlayers.FirstOrDefault(t => t._name.Contains(" T") || t._name.Contains("Titan"));
             Team team2 = teamsWithPlayers.FirstOrDefault(t => t._name.Contains(" C") || t._name.Contains("Collective"));
-            _turretStats = new Dictionary<string, TurretData>();
 
             // Extra check to make sure everyone is in dropship at game start
             // get all players in arena, if they are not on DropShip terrain 4, warp them back to the dropship by warping them warp group 2
@@ -6264,161 +6641,211 @@ private Player FindPlayerByAlias(string alias)
                 if (arena.Players.Any(p => p.StatsLastGame != null))
                 {
                     // Determine game mode based on player count
-                    string gameMode = arena.PlayersIngame.Count() <= 10 ? "OvD" : "Mix";
-                    // Add additional check to ensure correct game mode using the number of flags the team has.. If its 1, then its OvD, otherwise its Mix
-                    if (arena._flags.Values.Count(fs => fs.team != null) == 1)
-                    {
-                        gameMode = "OvD";
-                    }
-                    else
-                    {
-                        gameMode = "Mix";
-                    }
+                    string gameMode = baseUsed != "Unknown" ? "OvD" : "Mix";
+                    arena.sendArenaMessage(string.Format("Exporting stats for game mode {0}", gameMode), 0);
 
                     string gameStatsPath = System.IO.Path.Combine(baseStatsDir, string.Format("game_stats_{0}_{1}.csv", DateTime.Now.ToString("MM_dd_yyyy_HH_mm_ss"), arena._name.Replace(" ", "_")));
                     using (System.IO.StreamWriter writer = new System.IO.StreamWriter(gameStatsPath))
                     {
                         writer.WriteLine("PlayerName,Team,Kills,Deaths,Captures,CarrierKills,CarryTimeSeconds,GameLengthMinutes,Result,MainClass,ClassSwaps,TurretDamage,GameMode,Side,BaseUsed");
 
-                        // Define coordinate boundaries based on baseUsed
-                        int startX = 0, endX = 0, startY = 0, endY = 0;
-                        switch (baseUsed)
+                        // Get teams with more than 9 players
+                        var largeTeams = arena.Teams.Where(t => t.ActivePlayerCount > 9).ToList();
+
+                        // For each large team, check their flag position against base coordinates
+                        foreach (var team in largeTeams)
                         {
-                            case "D7":
-                                startX = 255 * 16; endX = 328 * 16;
-                                startY = 435 * 16; endY = 505 * 16;
-                                break;
-                            case "F6":
-                                startX = 375 * 16; endX = 481 * 16;
-                                startY = 435 * 16; endY = 509 * 16;
-                                break;
-                            case "F4":
-                                startX = 367 * 16; endX = 435 * 16;
-                                startY = 224 * 16; endY = 306 * 16;
-                                break;
-                            case "A7":
-                                startX = 255 * 16; endX = 328 * 16;
-                                startY = 435 * 16; endY = 505 * 16;
-                                break;
-                            case "A5":
-                                startX = 4 * 16; endX = 79 * 16;
-                                startY = 305 * 16; endY = 377 * 16;
-                                break;
-                            case "B6":
-                                startX = 128 * 16; endX = 203 * 16;
-                                startY = 432 * 16; endY = 515 * 16;
-                                break;
-                            default:
-                                startX = 0; endX = 0;
-                                startY = 0; endY = 0;
-                                break;
+                            var flags = _flags.Where(f => f.team == team).ToList();
+                            var flag = flags.FirstOrDefault();
+                            if (flag != null)
+                            {
+                                int startX = 0, endX = 0, startY = 0, endY = 0;
+                                string detectedBase = "Unknown";
+
+                                // Use existing case logic to check coordinates
+                                switch (baseUsed)
+                                {
+                                    case "D7":
+                                        startX = 255 * 16; endX = 328 * 16;
+                                        startY = 435 * 16; endY = 505 * 16;
+                                        if (flag.posX >= startX && flag.posX <= endX && 
+                                            flag.posY >= startY && flag.posY <= endY)
+                                            detectedBase = "D7";
+                                        break;
+                                    case "F6":
+                                        startX = 375 * 16; endX = 481 * 16;
+                                        startY = 435 * 16; endY = 509 * 16;
+                                        if (flag.posX >= startX && flag.posX <= endX && 
+                                            flag.posY >= startY && flag.posY <= endY)
+                                            detectedBase = "F6";
+                                        break;
+                                    case "F4":
+                                        startX = 367 * 16; endX = 435 * 16;
+                                        startY = 224 * 16; endY = 306 * 16;
+                                        if (flag.posX >= startX && flag.posX <= endX && 
+                                            flag.posY >= startY && flag.posY <= endY)
+                                            detectedBase = "F4";
+                                        break;
+                                    case "A7":
+                                        startX = 255 * 16; endX = 328 * 16;
+                                        startY = 435 * 16; endY = 505 * 16;
+                                        if (flag.posX >= startX && flag.posX <= endX && 
+                                            flag.posY >= startY && flag.posY <= endY)
+                                            detectedBase = "A7";
+                                        break;
+                                    case "A5":
+                                        startX = 4 * 16; endX = 79 * 16;
+                                        startY = 305 * 16; endY = 377 * 16;
+                                        if (flag.posX >= startX && flag.posX <= endX && 
+                                            flag.posY >= startY && flag.posY <= endY)
+                                            detectedBase = "A5";
+                                        break;
+                                    case "B6":
+                                        startX = 128 * 16; endX = 203 * 16;
+                                        startY = 432 * 16; endY = 515 * 16;
+                                        if (flag.posX >= startX && flag.posX <= endX && 
+                                            flag.posY >= startY && flag.posY <= endY)
+                                            detectedBase = "B6";
+                                        break;
+                                    default:
+                                        startX = 0; endX = 0;
+                                        startY = 0; endY = 0;
+                                        break;
+                                }
+                                // Arena message for base used for that team
+                                arena.sendArenaMessage(string.Format("Team {0} used base {1}", team._name, detectedBase));
+
+                                if (detectedBase != "Unknown")
+                                {
+                                    arena.sendArenaMessage(string.Format("Team {0} is using base {1}", team._name, detectedBase));
+                                }
+                            }
                         }
 
-                        foreach (Player p in arena.Players)
+                        // Cache the players list to avoid potential modification during iteration
+                        var players = arena.Players.ToList();
+                        foreach (Player p in players)
                         {
-                            // Only record stats for players on teams containing " T" or " C"
-                            if (p.StatsLastGame != null && p._team != null && 
-                                (p._team._name.Contains(" T") || p._team._name.Contains(" C")))
-                            {
-                                ctfPlayerProxy.player = p;
-                                // Calculate game length in minutes
-                                double gameLengthMinutes = (arena._tickGameEnded - arena._tickGameStarted) / (1000.0 * 60.0);
-                                // Determine if player won
-                                string result = "Loss";
-                                if (gameMode == "OvD")
-                                {
-                                    // Check if player is on offense team (has Squad Leader)
-                                    bool isOffense = p._team.ActivePlayers.Any(player => 
-                                        playerLastSkillNames.ContainsKey(player) && 
-                                        playerLastSkillNames[player] == "Squad Leader");
+                            // Guard clauses to skip invalid players
+                            if (p == null || p.StatsLastGame == null || p._team == null) continue;
+                            if (!p._team._name.Contains(" T") && !p._team._name.Contains(" C")) continue;
 
-                                    if (isOffense)
-                                    {
-                                        // Offense only wins if they explicitly achieved victory
-                                        if (winningTeamOVD == "offense")
-                                        {
-                                            result = "Win";
-                                        }
-                                    }
-                                    else // Defense team
-                                    {
-                                        // Defense wins by default unless offense achieved victory
-                                        if (winningTeamOVD != "offense")
-                                        {
-                                            result = "Win";
-                                        }
-                                    }
-                                }
-                                else // Standard game mode
+                            ctfPlayerProxy.player = p;
+                            double gameLengthMinutes = (arena._tickGameEnded - arena._tickGameStarted) / (1000.0 * 60.0);
+                            string result = "Loss";
+                            
+                            if (gameMode == "OvD")
+                            {
+                                bool isOffense = p._team.ActivePlayers.Any(player => 
+                                    playerLastSkillNames.ContainsKey(player) && 
+                                    playerLastSkillNames[player] == "Squad Leader");
+
+                                if (isOffense)
                                 {
-                                    if (winningTeam != null && p._team == winningTeam)
+                                    if (winningTeamOVD == "offense")
                                     {
                                         result = "Win";
                                     }
                                 }
-
-                                // Get the player's main class and swap count from the tracking dictionaries
-                                string mainClass = "Unknown";
-                                int classSwaps = 0;
-                                if (playerLastSkillNames.ContainsKey(p))
+                                else
                                 {
-                                    mainClass = playerLastSkillNames[p];
+                                    if (winningTeamOVD != "offense")
+                                    {
+                                        result = "Win";
+                                    }
                                 }
-
-                                // Get player's turret damage
-                                int turretDamage = 0;
-                                var playerStat = orderedPlayerStats.FirstOrDefault(x => x.Key == p._id);
-                                if (playerStat.Key != 0) // If player found in stats
+                            }
+                            else
+                            {
+                                if (winningTeam != null && p._team == winningTeam)
                                 {
-                                    turretDamage = playerStat.Value;
+                                    result = "Win";
                                 }
+                            }
 
-                                // Determine side based on game mode and team composition
-                                string side = "N/A";
-                                if (gameMode == "OvD" && p._team != null)
+                            string side = "N/A";
+                            if (gameMode == "Mix")
+                            {
+                                var teamSummonedCounts = summonedCounts.Where(x => x.Key.ToString() == p._team._name).ToList();
+                                if (teamSummonedCounts.Count > 0)
                                 {
-                                    bool hasSquadLeader = p._team.ActivePlayers.Any(player => 
-                                        playerLastSkillNames.ContainsKey(player) && 
-                                        playerLastSkillNames[player] == "Squad Leader");
-
-                                    bool hasFieldMedic = p._team.ActivePlayers.Any(player => 
-                                        playerLastSkillNames.ContainsKey(player) && 
-                                        playerLastSkillNames[player] == "Field Medic");
-
-                                    bool hasCombatEngineer = p._team.ActivePlayers.Any(player => 
-                                        playerLastSkillNames.ContainsKey(player) && 
-                                        playerLastSkillNames[player] == "Combat Engineer");
-
-                                    if (hasSquadLeader)
+                                    var top4 = teamSummonedCounts.OrderByDescending(x => x.Value).Take(4);
+                                    side = top4.Any(x => x.Key == p._id) ? "offense" : "defense";
+                                }
+                                else
+                                {
+                                    string skill = GetPrimarySkillName(p);
+                                    if (skill == "Squad Leader")
                                     {
                                         side = "offense";
                                     }
-                                    else if (hasFieldMedic || hasCombatEngineer)
+                                    else if (skill == "Field Medic" || skill == "Combat Engineer")
                                     {
                                         side = "defense";
                                     }
                                 }
-                                // Determine base used based on flag coordinates
-                                var bridge3Flag = arena.getFlag("Bridge3");
-                                
-                                writer.WriteLine(string.Format("{0},{1},{2},{3},{4},{5},{6},{7:F2},{8},{9},{10},{11},{12},{13},{14}",
-                                    p._alias.Replace(",", ""),
-                                    p._team._name ?? "None",
-                                    p.StatsLastGame.kills,
-                                    p.StatsLastGame.deaths,
-                                    p.StatsLastGame.zonestat5,
-                                    p.StatsLastGame.zonestat7,
-                                    p.StatsLastGame.zonestat3,
-                                    gameLengthMinutes,
-                                    result,
-                                    mainClass,
-                                    classSwaps,
-                                    turretDamage,
-                                    gameMode,
-                                    side,
-                                    baseUsed));
-                                ctfPlayerProxy.player = null;
                             }
+
+                            string mainClass = "Unknown";
+                            if (playerClassPlayTimes.ContainsKey(p))
+                            {
+                                var playTimes = playerClassPlayTimes[p];
+                                if (playTimes.Any())
+                                {
+                                    mainClass = playTimes.OrderByDescending(x => x.Value).First().Key;
+                                }
+                            }
+                            if (mainClass == "Unknown")
+                            {
+                                mainClass = GetPrimarySkillName(p);
+                            }
+
+                            int turretDamage = playerDamageStats.ContainsKey(p._id) ? playerDamageStats[p._id] : 0;
+
+                            if (gameMode == "OvD" && p._team != null)
+                            {
+                                bool hasSquadLeader = p._team.ActivePlayers.Any(player => 
+                                    playerLastSkillNames.ContainsKey(player) && 
+                                    playerLastSkillNames[player] == "Squad Leader");
+
+                                bool hasFieldMedic = p._team.ActivePlayers.Any(player => 
+                                    playerLastSkillNames.ContainsKey(player) && 
+                                    playerLastSkillNames[player] == "Field Medic");
+
+                                bool hasCombatEngineer = p._team.ActivePlayers.Any(player => 
+                                    playerLastSkillNames.ContainsKey(player) && 
+                                    playerLastSkillNames[player] == "Combat Engineer");
+
+                                if (hasSquadLeader)
+                                {
+                                    side = "offense";
+                                }
+                                else if (hasFieldMedic || hasCombatEngineer)
+                                {
+                                    side = "defense";
+                                }
+                            }
+
+                            int classSwaps = playerClassSwaps.ContainsKey(p) ? playerClassSwaps[p] : 0;
+
+                            writer.WriteLine(string.Format("{0},{1},{2},{3},{4},{5},{6},{7:F2},{8},{9},{10},{11},{12},{13},{14}",
+                                p._alias.Replace(",", ""),
+                                p._team._name ?? "None",
+                                p.StatsLastGame.kills,
+                                p.StatsLastGame.deaths,
+                                p.StatsLastGame.zonestat5,
+                                p.StatsLastGame.zonestat7,
+                                p.StatsLastGame.zonestat3,
+                                gameLengthMinutes,
+                                result,
+                                mainClass,
+                                classSwaps,
+                                turretDamage,
+                                gameMode,
+                                side,
+                                baseUsed));
+
+                            ctfPlayerProxy.player = null;
                         }
                     }
                 }
@@ -6430,7 +6857,16 @@ private Player FindPlayerByAlias(string alias)
             isSecondOvertime = false;
             overtimeStart = 0;
             secondOvertimeStart = 0;
-            _turretStats = null;
+            redirectSide = null;
+            redirectBase = null;
+            _turretStats.Clear();
+            _playerWeaponStats.Clear();
+            _ebHitStats.Clear();
+            minedStats.Clear();
+            playerClassPlayTimes.Clear();
+            playerLastClassSwitch.Clear();
+            playerClassSwaps.Clear();
+            winningTeamOVD = "defense";
             return true;
         }
 
@@ -6450,17 +6886,29 @@ private Player FindPlayerByAlias(string alias)
             isMixActive = false;
             isSD = false;
             isSecondOvertime = false;
-            overtimeStart = 0; // Add this line to reset overtimeStart
-            secondOvertimeStart = 0; // Optional: Reset secondOvertimeStart if needed
-            playerPool.Clear(); // Clear player pool
-            playerRolePreferences.Clear(); // Clear role preferences
+            overtimeStart = 0;
+            secondOvertimeStart = 0;
+            playerPool.Clear();
+            playerRolePreferences.Clear();
             assignedPlayersGlobal.Clear();
             team1.Clear();
             team2.Clear();
             aliasCounter = 0;
             signUpOrder.Clear();
+            redirectSide = null;
+            redirectBase = null;
+            is5v5 = false;
+            minedStats.Clear();
+            _turretStats.Clear();
+            _playerWeaponStats.Clear();
+            _ebHitStats.Clear();
+            playerClassPlayTimes.Clear();
+            playerLastClassSwitch.Clear();
+            playerClassSwaps.Clear();
+            winningTeamOVD = "defense";
+
             // Show breakdown for current game stats
-            arena.breakdown(true);
+            //arena.breakdown(true);
 
             if (isOVD)
             {
@@ -6610,6 +7058,23 @@ private Player FindPlayerByAlias(string alias)
         {
             switch (command.ToLower())
             {
+                // case "lm":
+                //     // server-side alias for loadmacro
+                //     string macroName = payload; // whatever the user typed after "?lm"
+                //     CS_Chat pkt = new CS_Chat
+                //     {
+                //         chatType = Helpers.Chat_Type.Macro,
+                //         recipient = "",
+                //         message = "?loadmacro " + macroName
+                //     };
+                //     player._client.sendReliable(pkt);
+                //     break;
+                case "playtime":
+                    SendOrderedPlayTimes(player);
+                    break;
+                case "stats":
+                    ListPlayerWeaponStats(player, payload);
+                    break;
                 case "playing":
                 case "p": // Alias for playing
                     player.spec("spec");
@@ -6647,7 +7112,7 @@ private Player FindPlayerByAlias(string alias)
                     commandHandler.HandleShortCommand(player, payload);
                     break;
                 case "swap":
-                    commandHandler.HandleSwapCommand(player, payload, CFG);
+                    commandHandler.HandleSwapCommand(player, payload, CFG, this);
                     // If MiniTP event, warp player to dropship based on team on.
                     if (currentEventType == EventType.MiniTP){
                         if (player._team._name.Contains("Titan")) {
@@ -6814,12 +7279,195 @@ private Player FindPlayerByAlias(string alias)
                 .ToList();
         }
 
+        // Method to list weapon stats for all players or a specific player
+        private void ListPlayerWeaponStats(Player requestingPlayer, string alias = null)
+        {
+            if (string.IsNullOrEmpty(alias))
+            {
+                // List all players' weapon stats
+                requestingPlayer.sendMessage(0, "#All Player Weapon Stats");
+                foreach (var playerStats in _playerWeaponStats)
+                {
+                    Player player = playerStats.Key;
+                    requestingPlayer.sendMessage(0, string.Format("@{0}'s Weapon Stats:", player._alias));
+                    
+                    // Show turret damage if any
+                    if (playerDamageStats.ContainsKey(player._id))
+                    {
+                        requestingPlayer.sendMessage(0, string.Format("*Turret Damage Dealt: {0}", playerDamageStats[player._id]));
+                    }
+
+                    foreach (var weaponStat in playerStats.Value)
+                    {
+                        if (weaponStat.Value.ShotsFired > 0)
+                        {
+                            string weaponName = player._server._assets.getItemByID(weaponStat.Key).name;
+                            requestingPlayer.sendMessage(0, string.Format("*Weapon: {0} | Shots: {1}/{2} | Acc: {3:P2}",
+                                weaponName,
+                                weaponStat.Value.ShotsLanded,
+                                weaponStat.Value.ShotsFired,
+                                (double)weaponStat.Value.ShotsLanded / weaponStat.Value.ShotsFired));
+                        }
+                    }
+                }
+            }
+            else
+            {
+                // List specific player's weapon stats
+                var player = arena.Players.FirstOrDefault(p => p._alias.Equals(alias, StringComparison.OrdinalIgnoreCase));
+                if (player != null && _playerWeaponStats.ContainsKey(player))
+                {
+                    requestingPlayer.sendMessage(0, string.Format("#{0}'s Weapon Stats", player._alias));
+                    
+                    // Show turret damage if any
+                    if (playerDamageStats.ContainsKey(player._id))
+                    {
+                        requestingPlayer.sendMessage(0, string.Format("&TURRET DMG: {0}", playerDamageStats[player._id]));
+                    }
+
+                    foreach (var weaponStat in _playerWeaponStats[player])
+                    {
+                        if (weaponStat.Value.ShotsFired > 0)
+                        {
+                            string weaponName = player._server._assets.getItemByID(weaponStat.Key).name;
+                            requestingPlayer.sendMessage(0, string.Format("*Weapon: {0} | Shots: {1}/{2} | Acc: {3:P2}",
+                                weaponName,
+                                weaponStat.Value.ShotsLanded,
+                                weaponStat.Value.ShotsFired,
+                                (double)weaponStat.Value.ShotsLanded / weaponStat.Value.ShotsFired));
+                        }
+                    }
+                }
+                else
+                {
+                    requestingPlayer.sendMessage(0, string.Format("No stats found for player '{0}'", alias));
+                }
+            }
+        }
+
+        // Dictionary to track stats for EB's hit per player (top 3)
+        private Dictionary<Player, int> _ebHitStats = new Dictionary<Player, int>();
+
         /// <summary>
         /// Called when the player uses ?breakdown or end game is called
         /// </summary>
         [Scripts.Event("Player.Breakdown")]
         public bool breakdown(Player from, bool bCurrent)
         {
+            // Display players weapon stats if they exist
+            // Display players weapon stats if they exist
+            if (_playerWeaponStats != null && _playerWeaponStats.Any())
+            {
+                from.sendMessage(0, "#Top 3 Player Accuracy");
+                
+                try
+                {
+                    // Calculate best accuracy per player
+                    var playerAccuracies = _playerWeaponStats
+                        .Select(playerStats => new {
+                            Player = playerStats.Key._alias,
+                            WeaponStats = playerStats.Value
+                                .Where(w => w.Value != null && w.Value.ShotsFired > 0) // Only consider weapons that were fired
+                                .OrderByDescending(w => (double)w.Value.ShotsLanded / w.Value.ShotsFired)
+                                .DefaultIfEmpty() // Handle case where no weapons were fired
+                                .First(),
+                            WeaponId = playerStats.Value
+                                .Where(w => w.Value != null && w.Value.ShotsFired > 0)
+                                .OrderByDescending(w => (double)w.Value.ShotsLanded / w.Value.ShotsFired)
+                                .Select(w => w.Key)
+                                .DefaultIfEmpty()
+                                .First()
+                        })
+                        .Where(x => x.WeaponStats.Value != null) // Filter out players with no valid weapon stats
+                        .OrderByDescending(x => (double)x.WeaponStats.Value.ShotsLanded / x.WeaponStats.Value.ShotsFired)
+                        .Take(3);
+
+                    int rank = 1;
+                    foreach (var entry in playerAccuracies)
+                    {
+                        double accuracy = (double)entry.WeaponStats.Value.ShotsLanded / entry.WeaponStats.Value.ShotsFired;
+                        string weaponName = from._server._assets.getItemByID(entry.WeaponId).name;
+                        from.sendMessage(0, string.Format("*{0}. {1} - {2:P2} accuracy with {3} ({4}/{5})", 
+                            rank++, entry.Player, accuracy,
+                            weaponName,
+                            entry.WeaponStats.Value.ShotsLanded, 
+                            entry.WeaponStats.Value.ShotsFired));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    from.sendMessage(0, "Error displaying weapon stats.");
+                }
+            }
+
+            // Show EB's hit stats if any
+            if (_ebHitStats != null && _ebHitStats.Any())
+            {
+                try
+                {
+                    from.sendMessage(0, "#EB's Hit Stats");
+                    var orderedEBStats = _ebHitStats.OrderByDescending(s => s.Value).Take(3).ToList();
+                    if (orderedEBStats.Count >= 1)
+                    {
+                        from.sendMessage(0, string.Format("*1st (HIT={0}): {1}", orderedEBStats[0].Value, orderedEBStats[0].Key));
+                    }
+                    if (orderedEBStats.Count >= 2)
+                    {
+                        from.sendMessage(0, string.Format("*2nd (HIT={0}): {1}", orderedEBStats[1].Value, orderedEBStats[1].Key));
+                    }
+                    if (orderedEBStats.Count >= 3)
+                    {
+                        from.sendMessage(0, string.Format("*3rd (HIT={0}): {1}", orderedEBStats[2].Value, orderedEBStats[2].Key));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    from.sendMessage(0, "Error displaying EB hit stats.");
+                }
+            }
+            
+            // Show mined stats if any
+            if (minedStats != null && minedStats.Any())
+            {
+                try
+                {
+                    from.sendMessage(0, "#Mined Stats");
+                    
+                    // Group stats by team name and calculate totals
+                    var teamTotals = minedStats
+                        .GroupBy(x => x.Key.Split(' ')[0]) // Group by team name
+                        .Select(g => new {
+                            Team = g.Key,
+                            ToxCount = g.Where(x => x.Key.Contains("Tox")).Sum(x => x.Value),
+                            TsoCount = g.Where(x => x.Key.Contains("Tso")).Sum(x => x.Value),
+                            Total = g.Sum(x => x.Value)
+                        })
+                        .OrderByDescending(x => x.Total)
+                        .Take(3)
+                        .ToList();
+
+                    if (teamTotals.Count >= 1)
+                    {
+                        from.sendMessage(0, string.Format("*1st {0}: (TOX={1}, TSO={2})", 
+                            teamTotals[0].Team, teamTotals[0].ToxCount, teamTotals[0].TsoCount));
+                    }
+                    if (teamTotals.Count >= 2) 
+                    {
+                        from.sendMessage(0, string.Format("*2nd {0}: (TOX={1}, TSO={2})",
+                            teamTotals[1].Team, teamTotals[1].ToxCount, teamTotals[1].TsoCount));
+                    }
+                    if (teamTotals.Count >= 3)
+                    {
+                        from.sendMessage(0, string.Format("*3rd {0}: (TOX={1}, TSO={2})",
+                            teamTotals[2].Team, teamTotals[2].ToxCount, teamTotals[2].TsoCount));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    from.sendMessage(0, "Error displaying mined stats.");
+                }
+            }
+            
             // Only show turret stats if we're doing a breakdown for the current game
             // and there are actually turret stats to show
             if (bCurrent && _turretStats != null && _turretStats.Any())
@@ -6891,6 +7539,31 @@ private Player FindPlayerByAlias(string alias)
         }
         // Dictionary to track Freedom AR shot counts per player
         private Dictionary<Player, int> _freedomARShotCount = new Dictionary<Player, int>();
+        // New method to handle projectile explosions properly using SC_Projectile
+        private void HandleExplosionProjectile(short posX, short posY, short posZ, int projectileId, int shooterId, byte yaw)
+        {
+            SC_Projectile explosion = new SC_Projectile
+            {
+                projectileID = (short)projectileId,
+                playerID = (ushort)shooterId,
+                posX = posX,
+                posY = posY,
+                posZ = posZ,
+                yaw = yaw
+            };
+
+            foreach (Player p in arena.Players)
+            {
+                p._client.sendReliable(explosion);
+            }
+        }
+
+        private Dictionary<string, Player> _projectileOwners = new Dictionary<string, Player>();
+        private HashSet<int> _ignoredExplosionWeaponIds = new HashSet<int>() { 1117, 1199, 1200 };
+        private int _lastExplosionTick;
+        private Player _lastExplosionShooter;
+        private int _lastExplosionWeaponId;
+        private short _lastExplosionX, _lastExplosionY, _lastExplosionZ;
 
         /// <summary>
         /// Triggered when an explosion happens from a projectile a player fired
@@ -6898,57 +7571,198 @@ private Player FindPlayerByAlias(string alias)
         [Scripts.Event("Player.Explosion")]
         public bool playerExplosion(Player from, ItemInfo.Projectile usedWep, short posX, short posY, short posZ)
         {
-            // Check if the weapon is Freedom AR
-            if (usedWep.name == "Freedom AR")
+            // Explosion occurred at coordinates arena message:
+            //arena.sendArenaMessage(string.Format("{0} exploded at {1}, {2}, {3}", usedWep.name, posX, posY, posZ));
+
+            // EB's hit stats for projectiles (IDs 1163 through 1166)
+            if (usedWep.id >= 1163 && usedWep.id <= 1166)
             {
-                // Get the current shot count for this player
-                if (!_freedomARShotCount.ContainsKey(from))
+                // Get players within 20 pixels of explosion
+                List<Player> playersInRange = arena.getPlayersInRange(posX, posY, 20);
+                
+                if (playersInRange.Count > 0)
                 {
-                    _freedomARShotCount[from] = 0;
+                    if (!_ebHitStats.ContainsKey(from))
+                    {
+                        _ebHitStats[from] = 0;
+                    }
+                    _ebHitStats[from]++;
+                }
+                // Map this explosion to its shooter using a composite key
+                string key = string.Format("{0}_{1}_{2}_{3}", usedWep.id, posX, posY, posZ);
+                _projectileOwners[key] = from;
+            }
+
+            // Stats for weapon damage
+            if (_playerStatsEnabled)
+            {
+                // Only update the global explosion record if this explosion is NOT one of the ignorable ones
+                if (!_ignoredExplosionWeaponIds.Contains(usedWep.id))
+                {
+                    _lastExplosionTick = Environment.TickCount;
+                    _lastExplosionShooter = from;
+                    _lastExplosionWeaponId = usedWep.id;
+                    _lastExplosionX = posX;
+                    _lastExplosionY = posY;
+                    _lastExplosionZ = posZ;
                 }
 
-                int shotCount = _freedomARShotCount[from];
-                int[] weaponIds = new int[] { 3017, 3013, 1162 };
-
-                // Update shot count
-                _freedomARShotCount[from] = (shotCount + 1) % 3;
-
-                // Get the new weapon projectile
-                ItemInfo.Projectile newWeapon = (ItemInfo.Projectile)AssetManager.Manager.getItemByID(weaponIds[shotCount]);
-                if (newWeapon != null)
+                // Initialize stats for new players
+                if (!_playerWeaponStats.ContainsKey(from))
                 {
-                    // Keep original weapon and fire both
-                    byte yaw = from._state.yaw;
-                    
-                    // Route both explosions to all players
-                    foreach (Player p in arena.Players)
-                    {
-                        // Fire original weapon
-                        SC_Projectile originalExplosion = new SC_Projectile
-                        {
-                            projectileID = (short)usedWep.id,
-                            playerID = (ushort)from._id,
-                            posX = posX,
-                            posY = posY,
-                            posZ = posZ,
-                            yaw = yaw
-                        };
-                        p._client.sendReliable(originalExplosion);
+                    _playerWeaponStats[from] = new Dictionary<int, WeaponStats>();
+                }
 
-                        // Fire additional weapon
-                        SC_Projectile additionalExplosion = new SC_Projectile
+                // Initialize stats for new weapons
+                if (!_playerWeaponStats[from].ContainsKey(usedWep.id))
+                {
+                    _playerWeaponStats[from][usedWep.id] = new WeaponStats();
+                }
+
+                var stats = _playerWeaponStats[from][usedWep.id];
+
+                // Track shots fired for specific weapon types
+                switch (usedWep.id)
+                {
+                    case 1115: // SC
+                    case 3032: // AC
+                    case 1083: // RPG
+                    case 1105: // Maklov LMG
+                    case 3027: // Kuchler LMG
+                    case 1052: // MML Middle Micro
+                    case 1556: // MMl Middle Mini
+                    case 5050: // CAW
+                    case 1318: // Rifle Grenade
+                    case 1113: // Tranq
+                    case 1163: // EB
+                    case 1164: // EB
+                    case 1165: // EB
+                    case 1166: // EB
+                    case 3017: // Maklov AR
+                    case 3013: // Kuchler AR
+                    case 3018: // Titan AR
+                    case 1179: // Haywire (128 radius)
+                    case 1178: // Haywire (102.4 radius)
+                    case 1173: // Haywire (76.8 radius)
+                    case 1174: // Haywire (51.2 radius)
+                    case 1175: // Haywire (25.6 radius)
+
+                        stats.ShotsFired++;
+                        // Map this explosion to its shooter using a composite key
+                        string key = string.Format("{0}_{1}_{2}_{3}", usedWep.id, posX, posY, posZ);
+                        _projectileOwners[key] = from;
+                        // arena.sendArenaMessage(string.Format("{0} fired weapon {1} (Total shots: {2})", 
+                        //     from._alias, usedWep.name, stats.ShotsFired));
+                        break;
+                }
+            }
+
+            // albert's EMP Grenade
+            if ((usedWep.name == "EMP Grenade" || usedWep.name == "Haywire Grenade") && (from._alias == "albert") && isChampEnabled)
+            {
+                // Get players within 20 pixels of explosion
+                List<Player> playersInRange = arena.getPlayersInRange(posX, posY, 128);
+                
+                if (playersInRange.Count > 0)
+                {
+                    string word = "BLOOP!";
+                    int xOffset = 10;
+                    for (int i = 0; i < word.Length; i++)
+                    {
+                        char letter = word[i];
+                        ItemInfo.Projectile letterWep = AssetManager.Manager.getItemByName(letter.ToString()) as ItemInfo.Projectile;
+                        if (letterWep != null)
                         {
-                            projectileID = (short)newWeapon.id,
-                            playerID = (ushort)from._id,
-                            posX = posX,
-                            posY = posY,
-                            posZ = posZ,
-                            yaw = yaw
-                        };
-                        p._client.sendReliable(additionalExplosion);
+                            short newPosX = (short)(posX + (i * xOffset));
+                            HandleExplosionProjectile(newPosX, posY, posZ, letterWep.id, from._id, from._state.yaw);
+                        }
                     }
                 }
             }
+            
+            // Herthbul's Tranq
+            if (usedWep.name == "Tranq" && (from._alias == "Herthbul") && isChampEnabled)
+            {
+                // Get players within 20 pixels of explosion
+                List<Player> playersInRange = arena.getPlayersInRange(posX, posY, 20);
+                
+                if (playersInRange.Count > 0)
+                {
+                    int[] explosionIds = new int[] { 1301, 1306, 1307 };
+                    int randomIndex = new Random().Next(explosionIds.Length);
+                    int selectedExplosionId = explosionIds[randomIndex];
+
+                    // Instead of using CS_Explosion (which causes an unowned explosion error),
+                    // create and send a projectile explosion message so that the explosion is properly owned.
+                    byte yaw = from._state.yaw;
+                    SC_Projectile tranqExplosion = new SC_Projectile
+                    {
+                        projectileID = (short)selectedExplosionId,
+                        playerID = (ushort)from._id,
+                        posX = posX,
+                        posY = posY,
+                        posZ = posZ,
+                        yaw = yaw
+                    };
+
+                    foreach (Player p in arena.Players)
+                    {
+                        p._client.sendReliable(tranqExplosion);
+                    }
+                }
+            }
+
+            // Check if the weapon is Freedom AR
+            // if (usedWep.name == "Freedom AR")
+            // {
+            //     // Get the current shot count for this player
+            //     if (!_freedomARShotCount.ContainsKey(from))
+            //     {
+            //         _freedomARShotCount[from] = 0;
+            //     }
+
+            //     int shotCount = _freedomARShotCount[from];
+            //     int[] weaponIds = new int[] { 3017, 3013, 1162 };
+
+            //     // Update shot count
+            //     _freedomARShotCount[from] = (shotCount + 1) % 3;
+
+            //     // Get the new weapon projectile
+            //     ItemInfo.Projectile newWeapon = (ItemInfo.Projectile)AssetManager.Manager.getItemByID(weaponIds[shotCount]);
+            //     if (newWeapon != null)
+            //     {
+            //         // Keep original weapon and fire both
+            //         byte yaw = from._state.yaw;
+                    
+            //         // Route both explosions to all players
+            //         foreach (Player p in arena.Players)
+            //         {
+            //             // Fire original weapon
+            //             SC_Projectile originalExplosion = new SC_Projectile
+            //             {
+            //                 projectileID = (short)usedWep.id,
+            //                 playerID = (ushort)from._id,
+            //                 posX = posX,
+            //                 posY = posY,
+            //                 posZ = posZ,
+            //                 yaw = yaw
+            //             };
+            //             p._client.sendReliable(originalExplosion);
+
+            //             // Fire additional weapon
+            //             SC_Projectile additionalExplosion = new SC_Projectile
+            //             {
+            //                 projectileID = (short)newWeapon.id,
+            //                 playerID = (ushort)from._id,
+            //                 posX = posX,
+            //                 posY = posY,
+            //                 posZ = posZ,
+            //                 yaw = yaw
+            //             };
+            //             p._client.sendReliable(additionalExplosion);
+            //         }
+            //     }
+            // }
             if (gameState != GameState.ActiveGame)
             { return true; }
 
@@ -7260,14 +8074,121 @@ private Player FindPlayerByAlias(string alias)
             return true;
         }
 
+        private int _storedPortalX = 0;
+        private int _storedPortalY = 0;
+        System.Threading.Timer portalTimer = null;  
+
+        // Class to store weapon stats
+        private class WeaponStats
+        {
+            public int ShotsFired { get; set; }
+            public int ShotsLanded { get; set; }
+            public double AverageDistance { get; set; }
+            public int TotalHits { get; set; }
+
+            public WeaponStats()
+            {
+                ShotsFired = 0;
+                ShotsLanded = 0;
+                AverageDistance = 0;
+                TotalHits = 0;
+            }
+        }
+
+        // Dictionary to track detailed weapon stats per player
+        private Dictionary<Player, Dictionary<int, WeaponStats>> _playerWeaponStats = new Dictionary<Player, Dictionary<int, WeaponStats>>();
+        private bool _playerStatsEnabled = false;
+
         /// <summary>
         /// Triggered when a player notifies the server of an explosion
         /// </summary>
-        [Scripts.Event("Player.DamageEvent")]
+        [Scripts.Event("Player.DamageEvent")] 
         public bool playerDamageEvent(Player player, ItemInfo.Projectile weapon, short posX, short posY, short posZ)
         {
             if (weapon == null || player == null)
                 return false;
+
+            // arena.sendArenaMessage(string.Format("Last explosion stats: Tick={0}, Shooter={1}, Weapon={2}, X={3}, Y={4}, Z={5}", 
+            //     _lastExplosionTick, _lastExplosionShooter._alias, _lastExplosionWeaponId, _lastExplosionX, _lastExplosionY, _lastExplosionZ));
+
+            if (_playerStatsEnabled)
+            {
+                // Use a tick-based threshold to match the last explosion event.
+                int currentTick = Environment.TickCount;
+                int tickThreshold = 200; // Acceptable difference in milliseconds
+
+                // Check if the last explosion event matches this weapon and is recent
+                if (weapon.id == _lastExplosionWeaponId && (currentTick - _lastExplosionTick) <= tickThreshold)
+                {
+                    // Use the stored shooter while still keeping 'player' as the victim.
+                    Player shooter = _lastExplosionShooter;
+
+                    // Update shooter stats for accuracy tracking
+                    if (!_playerWeaponStats.ContainsKey(shooter))
+                    {
+                        _playerWeaponStats[shooter] = new Dictionary<int, WeaponStats>();
+                    }
+                    if (!_playerWeaponStats[shooter].ContainsKey(weapon.id))
+                    {
+                        _playerWeaponStats[shooter][weapon.id] = new WeaponStats();
+                    }
+                    var shooterStats = _playerWeaponStats[shooter][weapon.id];
+
+                    shooterStats.ShotsLanded++;
+                    shooterStats.TotalHits++;
+
+                    // Calculate distance from explosion to victim's vehicle
+                    if (player._baseVehicle != null)
+                    {
+                        double distance = CalculateDistance(_lastExplosionX, _lastExplosionY, posX, posY);
+                        shooterStats.AverageDistance =
+                            ((shooterStats.AverageDistance * (shooterStats.TotalHits - 1)) + distance) / shooterStats.TotalHits;
+                    }
+
+                    // Debug message showing all weapon stats for the shooter
+                    string statsMessage = string.Format("Weapon Stats for {0}:", shooter._alias);
+                    foreach (var weaponStats in _playerWeaponStats[shooter])
+                    {
+                        ItemInfo weaponInfo = AssetManager.Manager.getItemByID(weaponStats.Key);
+                        string weaponName = weaponInfo != null ? weaponInfo.name : string.Format("Weapon {0}", weaponStats.Key);
+
+                        statsMessage += string.Format("\n{0}: Shots={1}, Hits={2}, Avg Distance={3:F2}",
+                            weaponName,
+                            weaponStats.Value.ShotsFired,
+                            weaponStats.Value.ShotsLanded,
+                            weaponStats.Value.AverageDistance);
+                    }
+                    // arena.sendArenaMessage(statsMessage);
+                }
+            }
+                
+            if (weapon.id == 1317){
+                // Player has entered a portal, use stored coordinates or generate new ones
+                if (_storedPortalX == 0 && _storedPortalY == 0) {
+                    // First player - generate and store random coordinates
+                    Random random = new Random();
+                    _storedPortalX = random.Next(0, 1000); 
+                    _storedPortalY = random.Next(0, 1000);
+                    
+                    // Only create a timer if portal coordinates were just generated
+                    if (_storedPortalX != 0 && _storedPortalY != 0) {
+                        portalTimer = new System.Threading.Timer((state) => {
+                            lock(this) {
+                                _storedPortalX = 0;
+                                _storedPortalY = 0;
+                                arena.sendArenaMessage("The portal has closed!");
+                            }
+                            ((System.Threading.Timer)state).Dispose();
+                        }, null, 30000, System.Threading.Timeout.Infinite); // 30000 ms = 30 seconds
+                    }
+                }
+
+                // Warp player to stored coordinates with small random offset
+                Random offsetRandom = new Random();
+                int offsetX = offsetRandom.Next(-50, 50);
+                int offsetY = offsetRandom.Next(-50, 50);
+                player.warp((_storedPortalX * 16) + offsetX, (_storedPortalY * 16) + offsetY);
+            }
 
             // Check if the damage event string is valid
             if (!string.IsNullOrEmpty(weapon.damageEventString))
@@ -7294,6 +8215,8 @@ private Player FindPlayerByAlias(string alias)
                 case EventType.Zombie:
                     HandleZombieDeath(victim, killer);
                     return false; // Prevent default respawn
+                case EventType.SUT:
+                    return true;
             }
             
             // if (is5v5){ // Check if medic dies, if true, check if any players left on defense in base coordinates
@@ -7359,12 +8282,6 @@ private Player FindPlayerByAlias(string alias)
             // }
 
             string victimSkill = GetPrimarySkillName(victim);
-            if (victimSkill.Equals("Dueler", StringComparison.OrdinalIgnoreCase))
-            {
-                victim.resetWarp();
-                WarpPlayerToExactLocation(victim, 759, 535);
-                return false;
-            } 
 
             if (currentEventType == EventType.Gladiator)
             {
@@ -7399,6 +8316,7 @@ private Player FindPlayerByAlias(string alias)
             // Check if the victim's primary skill is "Dueler"
             if (victimSkill.Equals("Dueler", StringComparison.OrdinalIgnoreCase))
             {
+                WarpPlayerToExactLocation(victim, 759, 535);
                 // Ensure the duel is in the correct state
                 if (duelState == DuelEventState.PoolPhase || duelState == DuelEventState.KnockoutPhase)
                 {
@@ -7521,6 +8439,44 @@ private Player FindPlayerByAlias(string alias)
         [Scripts.Event("Player.EnterArena")]
         public void playerEnterArena(Player player)
         {
+            // Check if the player belongs to any champion group
+            Dictionary<string, int> conversions = GetChampionConversionsForPlayer(player);
+            if (conversions != null)
+            {
+                // Enable champ item conversion by default for champion players.
+                _autoConvertEnabled[player] = true;
+
+                // Greet the champion and provide instructions
+                player.sendMessage(0, "&Welcome, Champion " + player._alias + "!");
+                player.sendMessage(0, "*You are eligible for champion item conversions. Champion items can be disabled by a mod just as an FYI.");
+                player.sendMessage(0, "*Type ?champ to toggle automatic champion item conversion on/off. They are enabled by default.");
+                player.sendMessage(0, "*Use ?b, ?bw, or ?bwd itemName for this to take effect. (?buy will not work!)");
+                player.sendMessage(0, "*The following champion items are available to you:");
+
+                // List the available champion conversions based on which group they belong to
+                if (s2Champs.Any(alias => alias.Equals(player._alias, StringComparison.OrdinalIgnoreCase)))
+                {
+                    player.sendMessage(0, "$Season 2 Champion Items:");
+                    foreach (var kvp in s2Conversions)
+                    {
+                        // Get the champion item name from the asset manager if available
+                        ItemInfo champItem = AssetManager.Manager.getItemByID(kvp.Value);
+                        string champItemName = champItem != null ? champItem.name : "Unknown";
+                        player.sendMessage(0, string.Format("~{0}", champItemName));
+                    }
+                }
+                else if (ovdl1Champs.Any(alias => alias.Equals(player._alias, StringComparison.OrdinalIgnoreCase)))
+                {
+                    player.sendMessage(0, "$OVDL1 Champion Items:");
+                    foreach (var kvp in ovdl1Conversions)
+                    {
+                        ItemInfo champItem = AssetManager.Manager.getItemByID(kvp.Value);
+                        string champItemName = champItem != null ? champItem.name : "Unknown";
+                        player.sendMessage(0, string.Format("~{0}", champItemName));
+                    }
+                }
+            }
+
             if (!arena._name.Contains("Arena 1"))
                 deprizeMinPremades(player, false, false); // Remove items regardless of skill
             if (isOVD)
@@ -7566,12 +8522,22 @@ private Player FindPlayerByAlias(string alias)
 
             if (currentEventType == EventType.SUT)
             {
-                player._state.positionX = 670;
-                player._state.positionY = 460;
-                List<Player> playerList = new List<Player> { player };
-                AssignTeamsForSUT(playerList);
-                return false;
+                for (int i = 2; i <= 33; i++)
+                {
+                    string teamName = CFG.teams[i].name;
+                    Team team = player._arena.getTeamByName(teamName);
+
+                    // Check if the team exists and is empty
+                    if (team != null && team.ActivePlayerCount == 0)
+                    {
+                        AssignPlayerToTeam(player, GetPrimarySkillName(player), team._name, true, false);
+                        WarpPlayerToRange(player, 679, 686, 608, 618, 1000);
+                        break;
+                    }                
+                    return true;
+                }
             }
+
 
             if (currentEventType == EventType.Gladiator && gladiatorPlayers != null)
             {
@@ -7734,6 +8700,17 @@ private Player FindPlayerByAlias(string alias)
             //     return false; // Return false to prevent other handlers from processing
             // }
 
+            // Toggle playerWeaponStats enable/disable
+            if (command.Equals("weaponstats", StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrEmpty(payload))
+                {
+                    _playerStatsEnabled = !_playerStatsEnabled;
+                }
+                player.sendMessage(0, string.Format("Weapon stats are now {0}", _playerStatsEnabled ? "enabled" : "disabled"));
+                return true;
+            }
+
             if (command.Equals("redirect", StringComparison.OrdinalIgnoreCase))
             {
                 if (string.IsNullOrWhiteSpace(payload))
@@ -7783,7 +8760,9 @@ private Player FindPlayerByAlias(string alias)
                 {
                     SaveState(payload);
                 }
+                return true;
             }
+            
             if (command.Equals("loadstate", StringComparison.OrdinalIgnoreCase)){
                 if (!string.IsNullOrEmpty(payload))
                 {
@@ -7796,6 +8775,7 @@ private Player FindPlayerByAlias(string alias)
                         LoadState(payload);
                     }
                 }
+                return true;
             }
 
             if (command.Equals("turrets", StringComparison.OrdinalIgnoreCase))
@@ -7804,14 +8784,9 @@ private Player FindPlayerByAlias(string alias)
                     {
                         BuildTurretExample(player);
                     }
+                    return true;
                 }
-
-            if (command.Equals("champItems", StringComparison.OrdinalIgnoreCase))
-                {
-                    isChampEnabled = !isChampEnabled;
-                    arena.sendArenaMessage(string.Format("Champ items are now {0}", isChampEnabled ? "enabled" : "disabled"));
-                }
-
+            
             if (command.Equals("turret", StringComparison.OrdinalIgnoreCase))
                 {
                     if (!string.IsNullOrEmpty(payload))
@@ -7820,6 +8795,14 @@ private Player FindPlayerByAlias(string alias)
                             short playerY = player._state.positionY;
                             BuildTurretAtLocation(player, payload, playerX, playerY);
                         }
+                    return true;
+                }
+
+            if (command.Equals("champItems", StringComparison.OrdinalIgnoreCase))
+                {
+                    isChampEnabled = !isChampEnabled;
+                    arena.sendArenaMessage(string.Format("Champ items are now {0}", isChampEnabled ? "enabled" : "disabled"));
+                    return true;
                 }
 
             if (command.Equals("deprize", StringComparison.OrdinalIgnoreCase))
@@ -7828,6 +8811,7 @@ private Player FindPlayerByAlias(string alias)
                     {
                         deprizeMinPremades(p, false, true);
                     }
+                    return true;
                 }
 
             if (command.Equals("arenaprofile", StringComparison.OrdinalIgnoreCase))
