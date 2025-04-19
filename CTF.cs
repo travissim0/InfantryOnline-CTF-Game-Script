@@ -413,6 +413,7 @@ private void CheckSUTVictory()
         }
     }
 }
+
 // Class to store player and vehicle state information
 private class PlayerState
 {
@@ -426,9 +427,9 @@ private class PlayerState
     public short Health { get; set; }
     public Dictionary<string, int> ItemCounts { get; set; }
     public long DeathTime { get; set; }
-    public bool IsOnVehicle { get; set; } // Track if the player was on a vehicle
-    public int VehicleId { get; set; } // Track the vehicle ID
-    public string Skill { get; set; } // Added property to store player's skill
+    public bool IsOnVehicle { get; set; }
+    public int VehicleId { get; set; }
+    public string Skill { get; set; }
 
     public PlayerState()
     {
@@ -470,17 +471,6 @@ private Dictionary<Tuple<string, int>, Vehicle> loadedVehicles = new Dictionary<
 // Variables for auto-save functionality
 private int lastAutoSaveTime = 0;
 private const int AUTO_SAVE_INTERVAL = 30000; // 30 seconds in milliseconds
-
-private readonly string[] itemsToTrack = new string[]
-{
-    "energizer", "stim pack", "repulsor coil", "repulsor charge",
-    "ammo rifle", "ammo shotgun", "ammo pistol", "light he",
-    "heavy he", "rocket", "ammo mg", "frag grenade", "wp grenade",
-    "haywire grenade", "emp grenade", "teleport beacon", "tranq",
-    "bullet mine", "maklov rg 2", "kuchler rg 249", "titan rg 2mv",
-    "fuel canister", "tsolvy crystals", "titanium oxide", "pandoras element",
-    "ap mine", "plasma mine", "grapeshot mine", "remote mine"
-};
 
 private bool isAutoSaving = false;
 private System.Threading.Timer autoSaveTimer;
@@ -703,6 +693,105 @@ private void SaveState(string stateName)
     if (stateName == "0:00")
     {
         arena.sendArenaMessage("Game states will auto-save every 30 seconds (e.g. 0:00, 0:30, 1:00, 1:30, etc)");
+    }
+}
+
+/// <summary>
+/// Exports the saved state to a CSV file in the SaveStates folder
+/// </summary>
+private void ExportStateToCSV(Player player, string stateName, string fileName)
+{
+    if (string.IsNullOrEmpty(stateName))
+    {
+        player.sendMessage(-1, "State name cannot be empty.");
+        return;
+    }
+
+    if (!savedGameStates.ContainsKey(stateName))
+    {
+        player.sendMessage(-1, string.Format("No saved state found with the name '{0}'.", stateName));
+        return;
+    }
+
+    if (string.IsNullOrEmpty(fileName))
+    {
+        fileName = stateName.Replace(":", "-"); // Replace colons with hyphens for file name
+    }
+
+    // Create directory structure
+    string baseDir = "SaveStates";
+    string playerDir = System.IO.Path.Combine(baseDir, player._alias);
+    string fullPath = System.IO.Path.Combine(playerDir, fileName + ".csv");
+
+    try
+    {
+        // Create directories if they don't exist
+        if (!System.IO.Directory.Exists(baseDir))
+            System.IO.Directory.CreateDirectory(baseDir);
+        
+        if (!System.IO.Directory.Exists(playerDir))
+            System.IO.Directory.CreateDirectory(playerDir);
+
+        // Create CSV content
+        using (System.IO.StreamWriter writer = new System.IO.StreamWriter(fullPath))
+        {
+            // Write header for player data
+            writer.WriteLine("DataType,PlayerAlias,PosX,PosY,Yaw,Direction,VelocityX,VelocityY,Energy,Health,DeathTime,IsOnVehicle,VehicleId,Skill,Items");
+
+            // Write player data
+            Dictionary<string, PlayerState> playerStates = savedGameStates[stateName];
+            foreach (var kvp in playerStates)
+            {
+                string playerAlias = kvp.Key;
+                PlayerState state = kvp.Value;
+                
+                // Format items as a semicolon-separated list of "itemName:count"
+                string items = string.Join(";", state.ItemCounts.Select(i => string.Format("{0}:{1}", i.Key, i.Value)));
+                
+                writer.WriteLine(string.Format("Player,{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11},{12},{13}", 
+                    playerAlias, state.PosX, state.PosY, state.Yaw, state.Direction, state.VelocityX, state.VelocityY, 
+                    state.Energy, state.Health, state.DeathTime, state.IsOnVehicle, state.VehicleId, state.Skill, items));
+            }
+
+            // Write header for vehicle data
+            writer.WriteLine("\nDataType,VehicleId,PosX,PosY,Yaw,Direction,VelocityX,VelocityY,Energy,Health,IsDestroyed,VehicleTypeId,Team");
+
+            // Write vehicle data
+            Dictionary<int, VehicleState> vehicleStates = savedVehicleStates[stateName];
+            foreach (var kvp in vehicleStates)
+            {
+                int vehicleId = kvp.Key;
+                VehicleState state = kvp.Value;
+                string teamName = state.Team != null ? state.Team._name : "None";
+                
+                writer.WriteLine(string.Format("Vehicle,{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11}", 
+                    vehicleId, state.PosX, state.PosY, state.Yaw, state.Direction, state.VelocityX, state.VelocityY, 
+                    state.Energy, state.Health, state.IsDestroyed, state.VehicleTypeId, teamName));
+            }
+
+            // Write header for flag data
+            writer.WriteLine("\nDataType,FlagId,PosX,PosY,OldPosX,OldPosY,Active,Team,Carrier");
+
+            // Write flag data
+            Dictionary<int, Arena.FlagState> flagStates = savedFlagStates[stateName];
+            foreach (var kvp in flagStates)
+            {
+                int flagId = kvp.Key;
+                Arena.FlagState state = kvp.Value;
+                string teamName = state.team != null ? state.team._name : "None";
+                string carrierName = state.carrier != null ? state.carrier._alias : "None";
+                
+                writer.WriteLine(string.Format("Flag,{0},{1},{2},{3},{4},{5},{6},{7}", 
+                    flagId, state.posX, state.posY, state.oldPosX, state.oldPosY, state.bActive, teamName, carrierName));
+            }
+        }
+
+        player.sendMessage(0, string.Format("State '{0}' exported to {1}", stateName, fullPath));
+    }
+    catch (Exception ex)
+    {
+        player.sendMessage(-1, string.Format("Error exporting state: {0}", ex.Message));
+        Log.write(TLog.Error, string.Format("Error exporting state: {0}", ex));
     }
 }
 
@@ -1008,7 +1097,438 @@ private void LoadState(string stateName)
     arena.sendArenaMessage(string.Format("Game state '{0}' has been loaded.", stateName));
 }
 
-        
+        /// <summary>
+        /// Loads a state with a pause and countdown before resuming gameplay
+        /// </summary>
+        private void LoadStatePause(string stateName)
+        {
+            if (string.IsNullOrEmpty(stateName))
+            {
+                return;
+            }
+
+            if (!savedGameStates.ContainsKey(stateName) || !savedVehicleStates.ContainsKey(stateName))
+            {
+                //arena.sendArenaMessage(string.Format("No saved state found with the name '{0}'.", stateName));
+                return;
+            }
+
+            // Load the state initially
+            LoadState(stateName);
+
+            // Make all players invincible and freeze their energy
+            foreach (Player player in arena.Players)
+            {
+                if (player == null || player.IsSpectator)
+                    continue;
+
+                // Change the players baseVehicle to a Paused Vehicle (id 159)
+                player.setDefaultVehicle(AssetManager.Manager.getVehicleByID(159));
+                player.resetInventory(true);
+
+                // ItemInfo pausedItem = AssetManager.Manager.getItemByName("Paused");
+                // if (pausedItem != null)
+                // {
+                //     player.inventoryModify(pausedItem, 1);
+                // }
+            }
+
+            // Start the countdown timer
+            arena.sendArenaMessage("Game paused for countdown...");
+            
+            // Create a timer for the countdown
+            System.Threading.Timer countdownTimer = null;
+            int countdown = 3;
+            
+            countdownTimer = new System.Threading.Timer((state) =>
+            {
+                if (countdown > 0)
+                {
+                    arena.sendArenaMessage(string.Format("&{0}...", countdown), 4);
+                    countdown--;
+                }
+                else
+                {
+                    arena.sendArenaMessage("GO!", 1);
+                    LoadState(stateName);
+                    countdownTimer.Dispose();
+                }
+            }, null, 0, 1000);
+        }
+
+        // A simple container for the minimal playbook data for a player.
+        private class SimplePlayerState
+        {
+            public short PosX { get; set; }
+            public short PosY { get; set; }
+            public byte Yaw { get; set; }
+            public char Side { get; set; }   // 'T' for Titan, 'C' for Collective
+            public string PrimarySkill { get; set; }
+        }
+
+        // This dictionary stores multiple playbook states, each keyed by a unique stateName and player alias.
+        // For each state, we keep a mapping: the key is a tuple of (Side, PrimarySkill)
+        // and the value is a queue of SimplePlayerState placements.
+        // (A queue is used so that if multiple players share the same key, they are cycled through.)
+        private Dictionary<string, Dictionary<string, Dictionary<Tuple<char, string>, Queue<SimplePlayerState>>>> simplePlaybookStates =
+            new Dictionary<string, Dictionary<string, Dictionary<Tuple<char, string>, Queue<SimplePlayerState>>>>();
+
+        /// <summary>
+        /// Helper: Determines the team side based on the player's team name.
+        /// Returns 'T' if the name contains "Titan" or " T", or 'C' if it contains "Collective" or " C".
+        /// If no match is found, returns '?'.
+        /// </summary>
+        private char GetTeamType(string teamName)
+        {
+            if (string.IsNullOrEmpty(teamName))
+                return '?';
+
+            string lower = teamName.ToLower();
+            if (lower.Contains("titan") || teamName.Contains(" T"))
+                return 'T';
+            if (lower.Contains("collective") || teamName.Contains(" C"))
+                return 'C';
+
+            return '?'; // Unknown team side
+        }
+
+        /// <summary>
+        /// Saves a simplified "playbook" state for all active (non-spectator) players in the arena.
+        /// Captures each player's posX, posY, yaw, side (based on their team name),
+        /// and primary skill (using GetPrimarySkillName(player)).
+        /// The resulting state is stored under the provided unique stateName and the player's alias.
+        /// </summary>
+        /// <param name="stateName">Unique name for this playbook state.</param>
+        // Dictionary to store playbook states globally for all players
+        private Dictionary<string, Dictionary<Tuple<char, string>, Queue<SimplePlayerState>>> playbookStates =
+            new Dictionary<string, Dictionary<Tuple<char, string>, Queue<SimplePlayerState>>>();
+
+        /// <summary>
+        /// Saves a simplified "playbook" state for all active (non-spectator) players in the arena.
+        /// Captures each player's posX, posY, yaw, side (based on their team name),
+        /// and primary skill (using GetPrimarySkillName(player)).
+        /// The resulting state is stored under the provided unique stateName.
+        /// </summary>
+        /// <param name="stateName">Unique name for this playbook state.</param>
+        private void SavePlaybook(string stateName)
+        {
+            if (string.IsNullOrEmpty(stateName))
+            {
+                arena.sendArenaMessage("Playbook state name cannot be empty.");
+                return;
+            }
+
+            // Create a mapping for this playbook state.
+            var stateMapping = new Dictionary<Tuple<char, string>, Queue<SimplePlayerState>>();
+
+            foreach (Player p in arena.PlayersIngame)
+            {
+                if (p == null || p.IsSpectator)
+                    continue;
+
+                // Determine team side and primary skill.
+                char side = GetTeamType(p._team._name);
+                string primarySkill = GetPrimarySkillName(p);
+
+                // Create and populate the simple state.
+                SimplePlayerState sps = new SimplePlayerState
+                {
+                    PosX = (short)(p._state.positionX / 16),
+                    PosY = (short)(p._state.positionY / 16),
+                    Yaw = p._state.yaw,
+                    Side = side,
+                    PrimarySkill = primarySkill
+                };
+
+                // Use a combined key of side and primary skill.
+                var key = Tuple.Create(side, primarySkill);
+                if (!stateMapping.ContainsKey(key))
+                {
+                    stateMapping[key] = new Queue<SimplePlayerState>();
+                }
+                stateMapping[key].Enqueue(sps);
+            }
+
+            playbookStates[stateName] = stateMapping;
+        }
+
+        /// <summary>
+        /// Loads a previously saved playbook state (by stateName) by scanning the current players
+        /// in arena.PlayersIngame and warping any player that has a matching saved entry.
+        /// For each player, we match on the primary skill and side. If there is a saved playbook slot,
+        /// the player is warped to that position.
+        /// </summary>
+        /// <param name="stateName">The name of the saved playbook state to load.</param>
+        private void LoadPlaybook(string stateName)
+        {
+            if (string.IsNullOrEmpty(stateName))
+            {
+                arena.sendArenaMessage("Playbook state name cannot be empty.");
+                return;
+            }
+
+            // Check if the playbook exists in memory
+            if (!playbookStates.ContainsKey(stateName))
+            {
+                // Try to load from file if not in memory
+                string playbooksDir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "playbooks");
+                string filePath = System.IO.Path.Combine(playbooksDir, stateName + ".json");
+                
+                if (System.IO.File.Exists(filePath))
+                {
+                    try
+                    {
+                        string jsonContent = System.IO.File.ReadAllText(filePath);
+                        var loadedStateMapping = new Dictionary<Tuple<char, string>, Queue<SimplePlayerState>>();
+                        
+                        // Parse the JSON content
+                        // Parse JSON manually since Newtonsoft.Json is not available
+                        var jsonObj = new Dictionary<string, List<SimplePlayerState>>();
+                        
+                        // Simple JSON parsing for our specific format
+                        string[] lines = jsonContent.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                        string currentKey = null;
+                        List<SimplePlayerState> currentStates = null;
+                        
+                        foreach (string line in lines)
+                        {
+                            if (line == null) continue;
+                            
+                            string trimmedLine = line.Trim();
+                            if (string.IsNullOrEmpty(trimmedLine)) continue;
+                            
+                            // Check for key line (e.g. "C,Scout": [)
+                            if (trimmedLine.Contains(":") && trimmedLine.EndsWith("["))
+                            {
+                                // Extract the key
+                                currentKey = trimmedLine.Substring(0, trimmedLine.IndexOf(":")).Trim().Trim('"');
+                                currentStates = new List<SimplePlayerState>();
+                                jsonObj[currentKey] = currentStates;
+                            }
+                            // Check for state object start
+                            else if (trimmedLine == "{")
+                            {
+                                // Start of a new state object
+                                if (currentStates != null)
+                                {
+                                    currentStates.Add(new SimplePlayerState());
+                                }
+                            }
+                            // Check for property lines
+                            else if (trimmedLine.Contains(":") && currentStates != null && currentStates.Count > 0)
+                            {
+                                string[] parts = trimmedLine.Split(new[] { ':' }, 2);
+                                if (parts.Length == 2)
+                                {
+                                    string propName = parts[0].Trim().Trim('"');
+                                    string propValue = parts[1].Trim().TrimEnd(',').Trim('"');
+                                    
+                                    SimplePlayerState currentState = currentStates[currentStates.Count - 1];
+                                    
+                                    if (propName == "PosX") currentState.PosX = short.Parse(propValue);
+                                    else if (propName == "PosY") currentState.PosY = short.Parse(propValue);
+                                    else if (propName == "Yaw") currentState.Yaw = byte.Parse(propValue);
+                                    else if (propName == "Side") currentState.Side = propValue[0];
+                                    else if (propName == "PrimarySkill") currentState.PrimarySkill = propValue;
+                                }
+                            }
+                        }
+                        
+                        foreach (var kvp in jsonObj)
+                        {
+                            if (kvp.Key == null) continue;
+                            
+                            string[] keyParts = kvp.Key.Split(',');
+                            if (keyParts.Length == 2)
+                            {
+                                char side = keyParts[0][0];
+                                string primarySkill = keyParts[1];
+                                var tupleKey = Tuple.Create(side, primarySkill);
+                                
+                                var stateQueue = new Queue<SimplePlayerState>(kvp.Value ?? new List<SimplePlayerState>());
+                                if (stateQueue.Count > 0)
+                                {
+                                    loadedStateMapping[tupleKey] = stateQueue;
+                                }
+                            }
+                        }
+                        
+                        // Add the loaded playbook to memory
+                        if (loadedStateMapping.Count > 0)
+                        {
+                            playbookStates[stateName] = loadedStateMapping;
+                            //arena.sendArenaMessage(string.Format("Playbook '{0}' loaded from file.", stateName));
+                        }
+                        else
+                        {
+                            arena.sendArenaMessage(string.Format("Failed to parse playbook file '{0}'.", stateName));
+                            return;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        arena.sendArenaMessage(string.Format("Error loading playbook from file: {0}", ex.Message));
+                        Log.write(TLog.Error, "Error loading playbook '{0}': {1}\n{2}", stateName, ex.Message, ex.StackTrace);
+                        return;
+                    }
+                }
+                else
+                {
+                    arena.sendArenaMessage(string.Format("No playbook state found with the name '{0}'.", stateName));
+                    return;
+                }
+            }
+
+            foreach (Player p in arena.PlayersIngame)
+            {
+                if (p == null || p.IsSpectator)
+                    continue;
+
+                // Compute the key for this player.
+                char side = GetTeamType(p._team._name);
+                string primarySkill = GetPrimarySkillName(p);
+                var key = Tuple.Create(side, primarySkill);
+
+                if (playbookStates[stateName].ContainsKey(key) && playbookStates[stateName][key].Count > 0)
+                {
+                    // Cycle through the available playbook slots for this key.
+                    Queue<SimplePlayerState> positionsQueue = playbookStates[stateName][key];
+                    SimplePlayerState placement = positionsQueue.Dequeue();
+                    positionsQueue.Enqueue(placement); // Re-enqueue to preserve the cyclic order for future loads.
+
+                    // Build a new object state for repositioning the player.
+                    var newState = new Helpers.ObjectState
+                    {
+                        positionX = (short)(placement.PosX * 16),
+                        positionY = (short)(placement.PosY * 16),
+                        positionZ = 0,
+                        yaw = placement.Yaw,
+                        velocityX = 0,
+                        velocityY = 0,
+                        energy = p._state.energy,
+                        health = p._state.health
+                    };
+
+                    // Reset any existing warp state and then warp the player.
+                    p.resetWarp();
+                    p.resetState(false, false, false);
+
+                    // Warp the player to restore position and state
+                    p.warp(Helpers.ResetFlags.ResetAll, newState, p._state.health, p._state.energy, placement.Yaw);
+
+                    // Force update yaw
+                    Vehicle vehicle = p._occupiedVehicle ?? p._baseVehicle;
+                    if (vehicle != null)
+                    {
+                        vehicle._state.yaw = placement.Yaw;
+
+                        // Send an update to the client to ensure the yaw is properly synced
+                        SC_PlayerUpdate stateUpdate = new SC_PlayerUpdate
+                        {
+                            tickUpdate = Environment.TickCount,
+                            player = p,
+                            vehicle = vehicle,
+                            itemID = 0, // No item used
+                            bBot = false,
+                            activeEquip = null
+                        };
+
+                        stateUpdate.vehicle._state = vehicle._state;
+                        p._client.sendReliable(stateUpdate);
+                    }
+
+                    // Notify the player.
+                    //p.sendMessage(0, string.Format("Warped to playbook position for skill '{0}' on side '{1}'.", primarySkill, side));
+                }
+                else
+                {
+                    p.sendMessage(-1, string.Format("No saved playbook position for skill '{0}' on side '{1}'.", primarySkill, side));
+                }
+            }
+
+            arena.sendArenaMessage(string.Format("Playbook state '{0}' loaded.", stateName));
+        }
+
+        /// <summary>
+        /// Exports a saved playbook state to a JSON file.
+        /// </summary>
+        /// <param name="stateName">The name of the playbook state to export.</param>
+        private void ExportPlayBook(string stateName)
+        {
+            if (string.IsNullOrEmpty(stateName))
+            {
+                arena.sendArenaMessage("Playbook state name cannot be empty.");
+                return;
+            }
+
+            if (!playbookStates.ContainsKey(stateName))
+            {
+                arena.sendArenaMessage(string.Format("No playbook state found with the name '{0}'.", stateName));
+                return;
+            }
+
+            try
+            {
+                // Create the playbooks directory if it doesn't exist
+                string playbooksDir = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "playbooks");
+                if (!System.IO.Directory.Exists(playbooksDir))
+                {
+                    System.IO.Directory.CreateDirectory(playbooksDir);
+                }
+
+                // Save the playbook to a file
+                string filePath = System.IO.Path.Combine(playbooksDir, stateName + ".json");
+                // Serialize the dictionary to JSON manually
+                System.Text.StringBuilder jsonBuilder = new System.Text.StringBuilder();
+                jsonBuilder.AppendLine("{");
+                
+                int keyCount = playbookStates[stateName].Count;
+                int currentKey = 0;
+                
+                foreach (var kvp in playbookStates[stateName])
+                {
+                    currentKey++;
+                    jsonBuilder.AppendLine(string.Format("  \"{0},{1}\": [", kvp.Key.Item1, kvp.Key.Item2));
+                    
+                    int queueCount = kvp.Value.Count;
+                    var queueItems = kvp.Value.ToArray();
+                    
+                    for (int i = 0; i < queueItems.Length; i++)
+                    {
+                        var state = queueItems[i];
+                        jsonBuilder.AppendLine("    {");
+                        jsonBuilder.AppendLine(string.Format("      \"PosX\": {0},", state.PosX));
+                        jsonBuilder.AppendLine(string.Format("      \"PosY\": {0},", state.PosY));
+                        jsonBuilder.AppendLine(string.Format("      \"Yaw\": {0},", state.Yaw));
+                        jsonBuilder.AppendLine(string.Format("      \"Side\": \"{0}\",", state.Side));
+                        jsonBuilder.AppendLine(string.Format("      \"PrimarySkill\": \"{0}\"", state.PrimarySkill));
+                        jsonBuilder.Append("    }");
+                        
+                        if (i < queueItems.Length - 1)
+                            jsonBuilder.AppendLine(",");
+                        else
+                            jsonBuilder.AppendLine();
+                    }
+                    
+                    jsonBuilder.Append("  ]");
+                    
+                    if (currentKey < keyCount)
+                        jsonBuilder.AppendLine(",");
+                    else
+                        jsonBuilder.AppendLine();
+                }
+                
+                jsonBuilder.AppendLine("}");
+                System.IO.File.WriteAllText(filePath, jsonBuilder.ToString());
+                //arena.sendArenaMessage(string.Format("Playbook '{0}' exported successfully to {1}", stateName, filePath));
+            }
+            catch (Exception ex)
+            {
+                //arena.sendArenaMessage(string.Format("Error exporting playbook: {0}", ex.Message));
+                //Log.write(TLog.Error, "Error exporting playbook: " + ex.ToString());
+            }
+        }
+
         private void ChangePlayerSkill(Player player, string skillName)
         {
             // Get the skill by name
@@ -1039,9 +1559,6 @@ private void LoadState(string stateName)
 
             // Synchronize player state to reflect the new skill and vehicle
             player.syncState();
-
-            // Notify the player that the skill has been changed
-            //player.sendMessage(0, string.Format("Your skill has been changed to {0}.", skillName));
         }
 
         // Method to update death count and take action
@@ -1300,10 +1817,24 @@ private void LoadState(string stateName)
             { "Needler", 1312 },
         };
 
+        private static readonly string[] s3Champs = new[]
+        {
+            "NewJack", "S", "Sov", "Zmn", "jay", "kal", "spark", "MIGHTS", "Ghost Bomber",
+            "Chevelle Rising", "Doris Burke", "juetnihilia", "baal", "B o o g", "Metal", "Sabotage"
+        };
+
+        private static readonly Dictionary<string, int> s3Conversions = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
+        {
+            //{ "Maklov AR mk 606", 3086 },
+            //{ "Maklov RG 2", 1326 },
+            { "Stunner", 1323 },
+            { "Micro Missile Launcher", 3087 }
+        };
+
         // OVDL1 Champions & their item conversion mappings
         private static readonly string[] ovdl1Champs = new[]
         {
-            "Angelus", "Herthbul", "Designer", "albert", "Ruler", "grump", "NewJack", "anjro", "CTF[Ref] Designer", "Joe"
+            "Angelus", "Herthbul", "Designer", "albert", "Ruler", "grump", "knight", "anjro", "CTF[Ref] Designer", "Joe"
         };
 
         private static readonly Dictionary<string, int> ovdl1Conversions = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
@@ -1330,6 +1861,8 @@ private void LoadState(string stateName)
                 return s2Conversions;
             if (ovdl1Champs.Any(alias => alias.Equals(player._alias, StringComparison.OrdinalIgnoreCase)))
                 return ovdl1Conversions;
+            if (s3Champs.Any(alias => alias.Equals(player._alias, StringComparison.OrdinalIgnoreCase)))
+                return s3Conversions;
             return null;
         }
 
@@ -3635,6 +4168,25 @@ private Player FindPlayerByAlias(string alias)
                     }
                 }
 
+                // Infiltrator announcement
+                bool withinGracePeriod = script.lastAnnouncementTimes.ContainsKey(player) &&
+                                                        (DateTime.Now - script.lastAnnouncementTimes[player]).TotalSeconds < AnnouncementGracePeriod;
+
+                // Announce the player's skill change if it is Infiltrator, not within the grace period, 
+                // and the player is not on team "np"
+                if (skill.Name == "Infiltrator" && !withinGracePeriod && player._team._name.ToLower() != "np" && !script.arena._name.Contains("Arena 1") && !script.arena._name.Contains("Public1"))
+                {
+                    // Make the actual announcement
+                    if (player._alias == "YAH" || player._alias == "JACKIE"){
+                        script.arena.sendArenaMessage("#SWITCHING CLASS IN UPPERCASE ------ TEAM " + player._team._name.ToUpper() + " ------ " + player._alias + ".", 14);
+                    } else {
+                        script.arena.sendArenaMessage("#CLOAKERS ------ TEAM " + player._team._name + " ------ " + player._alias + ".", 14);
+                    }
+
+                    // Update the last announcement time for the player
+                    script.lastAnnouncementTimes[player] = DateTime.Now;
+                }
+
                 // Update play time for current skill before changing to new skill using inline logic to retrieve the primary skill info
                 SkillInfo currentSkill = null;
                 if (player._skills != null && player._skills.Count > 0)
@@ -3710,6 +4262,16 @@ private Player FindPlayerByAlias(string alias)
             /// </summary>
             private Dictionary<string, string> shortCommands = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
+                { "Fuel Canister", "@fc" },
+                { "Gas Canister", "@gc" },
+                { "Heavy HE", "@hHE" },
+                { "Light HE", "@lHE" },
+                { "Ammo MG", "@mg" },
+                { "Ammo Rifle", "@ri" },
+                { "Ammo Shotgun", "@sh" },
+                { "Rocket", "@ro" },
+                { "Ammo Pistol", "@pi" },
+                { "Bullet Mines", "bM" },
                 { "PF Generator", "pf" },
                 { "IDF Generator", "idf" },
                 { "EMP Generator", "emp" },
@@ -4144,6 +4706,9 @@ private Player FindPlayerByAlias(string alias)
                 new Tuple<string, string, string, string, string>("medbonds", "?buy cmp4,emp,medic beamer,ssc,td,teleport summoner,needler,medikit,deluxe medikit,smg1,es,stunner,ammo pistol:#120,basic,frag grenade:4,tranq:10", 
                                                                 "*Standard medic build. Weapons: SMG/EB. Utility items (ES, TD).", 
                                                                 "Field Medic", "bonds"),
+                new Tuple<string, string, string, string, string>("med", "?buy cmp4,emp,medic beamer,ssc,td,teleport summoner,needler,medikit,deluxe medikit,smg1,es,stunner,ammo pistol:#120,basic,frag grenade:4,tranq:10", 
+                                                                "*Standard medic build. Weapons: SMG/EB. Utility items (ES, TD).", 
+                                                                "Field Medic", "bonds"),
                 new Tuple<string, string, string, string, string>("eng", "?buy basic,nades,fr,inc,eb,kev,ssc,pf,hoverboard,tbox,nades,basic,grapeshot mine:5,repair,ammo pistol:500,fuel canister:#50,ammo shotgun:#100", 
                                                                 "Standard engineer build. Weapons: Flechette/EB/Incin/Grenades/grapeshot Mines. Utility items (Kevlite, SSC, PF, Hoverboard, Turret box, repair kit).", 
                                                                 "Combat Engineer", "default"),
@@ -4190,6 +4755,7 @@ private Player FindPlayerByAlias(string alias)
                 // Send a message to the player with the item details
                 player.sendMessage(0, string.Format("Item: {0}, Quantity: {1}", itemName, quantity));
             }
+            return;
         }
 
         /*//////////////////////////////////////////////////
@@ -4398,7 +4964,11 @@ private Player FindPlayerByAlias(string alias)
             BuildTurretAtLocation(player, "Sentry", (short)(playerX - 100), playerY); // Build sentry turret 100 units to the left
 
             player.sendMessage(0, "Built example turrets around your position");
+            return;
         }
+
+                    // Dictionary to persist swing data between commands
+            private Dictionary<string, string> swingDictionary = new Dictionary<string, string>();
 
         private void HandleBuildCommand(Player player, string buildName)
         {
@@ -4643,6 +5213,7 @@ private Player FindPlayerByAlias(string alias)
             {
                 player.sendMessage(-1, "You cannot purchase builds from this location");
             }
+            return;
         }
 
         private void WipeInventory(Player player, string payload)
@@ -4654,6 +5225,7 @@ private Player FindPlayerByAlias(string alias)
             } else {
                 player.sendMessage(0, "Cannot wipe inventory from this location.");
             }
+            return;
         }
 
         // Dictionary to remember the last used build for each player
@@ -4699,6 +5271,7 @@ private Player FindPlayerByAlias(string alias)
 
             // Buy the build
             HandleBuildCommand(player, buildName);
+            return;
         }
 
         // Wipes inventory, buys the build, and fills up all possible ammo types to their maximum
@@ -4750,6 +5323,7 @@ private Player FindPlayerByAlias(string alias)
 
             // Fill up all possible ammo types to their maximum
             MaxOutAmmo(player);
+            return;
         }
 
         // Fill the player's inventory with the maximum allowed ammo for each type in maxAmmoQuantities
@@ -4784,6 +5358,7 @@ private Player FindPlayerByAlias(string alias)
                     player.sendMessage(-1, "@Ammo type '" + ammoName + "' not found.");
                 }
             }
+            return;
         }
 
         private void DropUnusedItems(Player player, string buildName)
@@ -4912,6 +5487,7 @@ private Player FindPlayerByAlias(string alias)
             {
                 player.sendMessage(-1, "Build not found. Available builds are: " + string.Join(", ", buildSets.Keys));
             }
+            return;
         }
 
         public void CountItemsOnSpecificTerrain(Arena arena)
@@ -4970,6 +5546,7 @@ private Player FindPlayerByAlias(string alias)
             // Send the formatted messages to the arena
             arena.sendArenaMessage(titanMessage);
             arena.sendArenaMessage(collectiveMessage);
+            return;
         }
 
         /*//////////////////////////////////////////////////
@@ -4999,11 +5576,13 @@ private Player FindPlayerByAlias(string alias)
             }
             return "Unknown"; // Default to "Unknown" if no skill is found
         }
+        // Define the non-expiring item IDs
+        HashSet<int> nonExpiringItemIDs = new HashSet<int> { 2005, 2007, 2009, 2, 9, 10, 11 }; // Tox, Tso, Steron Injection, AutoGuns (premades)
 
         public void pollItemExpiration()
         {
             // Iterate through all items currently in the arena
-            foreach (var item in arena._items.Values)
+            foreach (var item in arena._items.Values.Where(i => nonExpiringItemIDs.Contains(i.item.id)))
             {
                 // Fetch the item's current position
                 short itemX = item.positionX;
@@ -5014,9 +5593,6 @@ private Player FindPlayerByAlias(string alias)
 
                 // Fetch the prizeExpire value from the terrain configuration in cfg.terrains
                 int prizeExpireTime = CFG.terrains[terrainID].prizeExpire;
-
-                // Define the non-expiring item IDs
-                HashSet<int> nonExpiringItemIDs = new HashSet<int> { 2005, 2007, 2009, 2, 9, 10, 11 }; // Tox, Tso, Steron Injection, AutoGuns (premades)
 
                 // Check if item is "Ammo MG" with stack < 50
                 // if (item.item.name == "Ammo MG" && item.quantity < 50)
@@ -5050,59 +5626,59 @@ private Player FindPlayerByAlias(string alias)
                     }
 
                     // We need to get the current skill name from the player's skills dictionary
-                    string currentSkillName = GetPrimarySkillName(player);
+                    // string currentSkillName = GetPrimarySkillName(player);
 
-                    // Get the player's current team name
-                    string currentTeamName = player._team != null ? player._team._name : "SPEC";
+                    // // Get the player's current team name
+                    // string currentTeamName = player._team != null ? player._team._name : "SPEC";
 
-                    // Check if the player's skill name has changed
-                    if (!playerLastSkillNames.ContainsKey(player) || playerLastSkillNames[player] != currentSkillName)
-                    {
-                        // Check if the player has ever been on a non-SPEC team
-                        if (!playerHasPlayed.ContainsKey(player))
-                        {
-                            playerHasPlayed[player] = false; // Default to false if not tracked yet
-                        }
+                    // // Check if the player's skill name has changed
+                    // if (!playerLastSkillNames.ContainsKey(player) || playerLastSkillNames[player] != currentSkillName)
+                    // {
+                    //     // Check if the player has ever been on a non-SPEC team
+                    //     if (!playerHasPlayed.ContainsKey(player))
+                    //     {
+                    //         playerHasPlayed[player] = false; // Default to false if not tracked yet
+                    //     }
 
-                        // If the player is currently on a non-SPEC team, mark them as having played
-                        if (currentTeamName != "spec")
-                        {
-                            playerHasPlayed[player] = true; // Mark the player as having played
-                        }
+                    //     // If the player is currently on a non-SPEC team, mark them as having played
+                    //     if (currentTeamName != "spec")
+                    //     {
+                    //         playerHasPlayed[player] = true; // Mark the player as having played
+                    //     }
 
-                        // Only announce class changes for players who have ever been on a non-SPEC team
-                        if (playerHasPlayed[player])
-                        {
-                            // Update the dictionary with the new skill name
-                            playerLastSkillNames[player] = currentSkillName;
+                    //     // Only announce class changes for players who have ever been on a non-SPEC team
+                    //     if (playerHasPlayed[player])
+                    //     {
+                    //         // Update the dictionary with the new skill name
+                    //         playerLastSkillNames[player] = currentSkillName;
 
-                            // Check if the player is within the grace period for announcements
-                            bool withinGracePeriod = lastAnnouncementTimes.ContainsKey(player) &&
-                                                       (DateTime.Now - lastAnnouncementTimes[player]).TotalSeconds < AnnouncementGracePeriod;
+                    //         // Check if the player is within the grace period for announcements
+                    //         bool withinGracePeriod = lastAnnouncementTimes.ContainsKey(player) &&
+                    //                                    (DateTime.Now - lastAnnouncementTimes[player]).TotalSeconds < AnnouncementGracePeriod;
 
-                            // Announce the player's skill change if it is Infiltrator, not within the grace period, 
-                            // and the player is not on team "np"
-                            if (currentSkillName == "Infiltrator" && !withinGracePeriod && currentTeamName.ToLower() != "np")
-                            {
-                                // Make the actual announcement
-                                if (player._alias == "YAH" || player._alias == "JACKIE"){
-                                    arena.sendArenaMessage("#SWITCHING CLASS IN UPPERCASE ------ TEAM " + currentTeamName.ToUpper() + " ------ " + player._alias + ".", 14);
-                                } else {
-                                    arena.sendArenaMessage("#CLOAKERS ------ TEAM " + currentTeamName + " ------ " + player._alias + ".", 14);
-                                }
+                    //         // Announce the player's skill change if it is Infiltrator, not within the grace period, 
+                    //         // and the player is not on team "np"
+                    //         if (currentSkillName == "Infiltrator" && !withinGracePeriod && currentTeamName.ToLower() != "np")
+                    //         {
+                    //             // Make the actual announcement
+                    //             if (player._alias == "YAH" || player._alias == "JACKIE"){
+                    //                 arena.sendArenaMessage("#SWITCHING CLASS IN UPPERCASE ------ TEAM " + currentTeamName.ToUpper() + " ------ " + player._alias + ".", 14);
+                    //             } else {
+                    //                 arena.sendArenaMessage("#CLOAKERS ------ TEAM " + currentTeamName + " ------ " + player._alias + ".", 14);
+                    //             }
 
-                                // Send another arena message 5 times every 1 second
-                                // for (int i = 0; i < 5; i++)
-                                // {
-                                //     arena.sendArenaMessage("#HEY YOU AUTISTIC FUCK, TURN YOUR ES ON", 3);
-                                //     System.Threading.Thread.Sleep(1000);
-                                // }
+                    //             // Send another arena message 5 times every 1 second
+                    //             // for (int i = 0; i < 5; i++)
+                    //             // {
+                    //             //     arena.sendArenaMessage("#HEY YOU AUTISTIC FUCK, TURN YOUR ES ON", 3);
+                    //             //     System.Threading.Thread.Sleep(1000);
+                    //             // }
 
-                                // Update the last announcement time for the player
-                                lastAnnouncementTimes[player] = DateTime.Now;
-                            }
-                        }
-                    }
+                    //             // Update the last announcement time for the player
+                    //             lastAnnouncementTimes[player] = DateTime.Now;
+                    //         }
+                    //     }
+                    // }
                 }
             }
         }
@@ -5957,6 +6533,25 @@ private Player FindPlayerByAlias(string alias)
                 playerClassSwaps[from] = 0;
             playerClassSwaps[from]++;
 
+            // Infiltrator announcement
+            bool withinGracePeriod = lastAnnouncementTimes.ContainsKey(from) &&
+                                                       (DateTime.Now - lastAnnouncementTimes[from]).TotalSeconds < AnnouncementGracePeriod;
+
+            // Announce the player's skill change if it is Infiltrator, not within the grace period, 
+            // and the player is not on team "np"
+            if (skill.Name == "Infiltrator" && !withinGracePeriod && from._team._name.ToLower() != "np" && !arena._name.Contains("Arena 1") && !arena._name.Contains("Public1"))
+            {
+                // Make the actual announcement
+                if (from._alias == "YAH" || from._alias == "JACKIE"){
+                    arena.sendArenaMessage("#SWITCHING CLASS IN UPPERCASE ------ TEAM " + from._team._name.ToUpper() + " ------ " + from._alias + ".", 14);
+                } else {
+                    arena.sendArenaMessage("#CLOAKERS ------ TEAM " + from._team._name + " ------ " + from._alias + ".", 14);
+                }
+
+                // Update the last announcement time for the player
+                lastAnnouncementTimes[from] = DateTime.Now;
+            }
+
             if (currentEventType == EventType.CTFX){
                 WarpPlayerToRange(from, 985, 997, 1117, 1129);
                 return false;
@@ -6056,6 +6651,14 @@ private Player FindPlayerByAlias(string alias)
         [Scripts.Event("Player.Portal")]
         public bool playerPortal(Player player, LioInfo.Portal portal)
         {
+            // Initialize tracking for new players if needed
+            if (!playerClassPlayTimes.ContainsKey(player))
+            {
+                playerClassPlayTimes[player] = new Dictionary<string, int>();
+                playerLastClassSwitch[player] = Environment.TickCount;
+                playerClassSwaps[player] = 0;
+            }
+
             // Check if the player's arena and event type are valid
             if (currentEventType == EventType.MiniTP)
             {
@@ -6234,10 +6837,6 @@ private Player FindPlayerByAlias(string alias)
             return true;
         }
 
-
-        // Define the non-expiring item IDs
-         HashSet<int> nonExpiringItemIDs = new HashSet<int> { 2005, 2007, 2009, 2, 9, 10, 11 };
-
         /// <summary>
         /// Triggered when a player requests to drop an item
         /// </summary>
@@ -6334,7 +6933,7 @@ private Player FindPlayerByAlias(string alias)
         public bool StartGame()
         {
 
-            if (arena._name.Contains("CTFDL") || arena._name.Contains("OVDL")){ // or OVDL1
+            if (arena._name.Contains("CTFDL") || arena._name.Contains("CTFPL") || arena._name.Contains("OVDL")){
                 // Disable champ item conversion for CTFDL or OVDL arenas
                 isChampEnabled = false;
             }
@@ -6627,225 +7226,229 @@ private Player FindPlayerByAlias(string alias)
                 arena.sendArenaMessage("&Game has ended, Host may either *reset to spec all, or *restart for a rematch", 3);
             }
 
-            // Only proceed if we have turret stats to write
-            if (_turretStats != null && _turretStats.Any())
-            {
-                // Create base stats directory if it doesn't exist
-                string baseStatsDir = "playerStats";
-                if (!System.IO.Directory.Exists(baseStatsDir))
+            if (isOVD && !arena._name.Contains("#") && arena._name != "Arena 1"){
+                // Only proceed if we have turret stats to write
+                if (_turretStats != null && _turretStats.Any())
                 {
-                    System.IO.Directory.CreateDirectory(baseStatsDir);
-                }
-
-                // Export regular game stats as CSV if we have any players with stats
-                if (arena.Players.Any(p => p.StatsLastGame != null))
-                {
-                    // Determine game mode based on player count
-                    string gameMode = baseUsed != "Unknown" ? "OvD" : "Mix";
-                    arena.sendArenaMessage(string.Format("Exporting stats for game mode {0}", gameMode), 0);
-
-                    string gameStatsPath = System.IO.Path.Combine(baseStatsDir, string.Format("game_stats_{0}_{1}.csv", DateTime.Now.ToString("MM_dd_yyyy_HH_mm_ss"), arena._name.Replace(" ", "_")));
-                    using (System.IO.StreamWriter writer = new System.IO.StreamWriter(gameStatsPath))
+                    // Create base stats directory if it doesn't exist
+                    string baseStatsDir = "playerStats";
+                    if (!System.IO.Directory.Exists(baseStatsDir))
                     {
-                        writer.WriteLine("PlayerName,Team,Kills,Deaths,Captures,CarrierKills,CarryTimeSeconds,GameLengthMinutes,Result,MainClass,ClassSwaps,TurretDamage,GameMode,Side,BaseUsed");
+                        System.IO.Directory.CreateDirectory(baseStatsDir);
+                    }
 
-                        // Get teams with more than 9 players
-                        var largeTeams = arena.Teams.Where(t => t.ActivePlayerCount > 9).ToList();
+                    // Export regular game stats as CSV if we have any players with stats
+                    if (arena.Players.Any(p => p.StatsLastGame != null))
+                    {
+                        // Determine game mode based on player count
+                        string gameMode = (arena.PlayersIngame.Count() <= 10) ? "OvD" : "Mix";
+                        //arena.sendArenaMessage(string.Format("Exporting stats for game mode {0}", gameMode), 0);
 
-                        // For each large team, check their flag position against base coordinates
-                        foreach (var team in largeTeams)
+                        string gameStatsPath = System.IO.Path.Combine(baseStatsDir, string.Format("game_stats_{0}_{1}.csv", DateTime.Now.ToString("MM_dd_yyyy_HH_mm_ss"), arena._name.Replace(" ", "_")));
+                        using (System.IO.StreamWriter writer = new System.IO.StreamWriter(gameStatsPath))
                         {
-                            var flags = _flags.Where(f => f.team == team).ToList();
-                            var flag = flags.FirstOrDefault();
-                            if (flag != null)
+                            writer.WriteLine("PlayerName,Team,Kills,Deaths,Captures,CarrierKills,CarryTimeSeconds,GameLengthMinutes,Result,MainClass,ClassSwaps,TurretDamage,GameMode,Side,BaseUsed");
+
+                            // Get teams with more than 9 players
+                            var largeTeams = arena.Teams.Where(t => t.ActivePlayerCount > 9).ToList();
+
+                            // For each large team, check their flag position against base coordinates
+                            foreach (var team in largeTeams)
                             {
-                                int startX = 0, endX = 0, startY = 0, endY = 0;
-                                string detectedBase = "Unknown";
-
-                                // Use existing case logic to check coordinates
-                                switch (baseUsed)
+                                var flags = _flags.Where(f => f.team == team).ToList();
+                                var flag = flags.FirstOrDefault();
+                                if (flag != null)
                                 {
-                                    case "D7":
-                                        startX = 255 * 16; endX = 328 * 16;
-                                        startY = 435 * 16; endY = 505 * 16;
-                                        if (flag.posX >= startX && flag.posX <= endX && 
-                                            flag.posY >= startY && flag.posY <= endY)
-                                            detectedBase = "D7";
-                                        break;
-                                    case "F6":
-                                        startX = 375 * 16; endX = 481 * 16;
-                                        startY = 435 * 16; endY = 509 * 16;
-                                        if (flag.posX >= startX && flag.posX <= endX && 
-                                            flag.posY >= startY && flag.posY <= endY)
-                                            detectedBase = "F6";
-                                        break;
-                                    case "F4":
-                                        startX = 367 * 16; endX = 435 * 16;
-                                        startY = 224 * 16; endY = 306 * 16;
-                                        if (flag.posX >= startX && flag.posX <= endX && 
-                                            flag.posY >= startY && flag.posY <= endY)
-                                            detectedBase = "F4";
-                                        break;
-                                    case "A7":
-                                        startX = 255 * 16; endX = 328 * 16;
-                                        startY = 435 * 16; endY = 505 * 16;
-                                        if (flag.posX >= startX && flag.posX <= endX && 
-                                            flag.posY >= startY && flag.posY <= endY)
-                                            detectedBase = "A7";
-                                        break;
-                                    case "A5":
-                                        startX = 4 * 16; endX = 79 * 16;
-                                        startY = 305 * 16; endY = 377 * 16;
-                                        if (flag.posX >= startX && flag.posX <= endX && 
-                                            flag.posY >= startY && flag.posY <= endY)
-                                            detectedBase = "A5";
-                                        break;
-                                    case "B6":
-                                        startX = 128 * 16; endX = 203 * 16;
-                                        startY = 432 * 16; endY = 515 * 16;
-                                        if (flag.posX >= startX && flag.posX <= endX && 
-                                            flag.posY >= startY && flag.posY <= endY)
-                                            detectedBase = "B6";
-                                        break;
-                                    default:
-                                        startX = 0; endX = 0;
-                                        startY = 0; endY = 0;
-                                        break;
-                                }
-                                // Arena message for base used for that team
-                                arena.sendArenaMessage(string.Format("Team {0} used base {1}", team._name, detectedBase));
+                                    int startX = 0, endX = 0, startY = 0, endY = 0;
+                                    string detectedBase = "Unknown";
 
-                                if (detectedBase != "Unknown")
-                                {
-                                    arena.sendArenaMessage(string.Format("Team {0} is using base {1}", team._name, detectedBase));
-                                }
-                            }
-                        }
-
-                        // Cache the players list to avoid potential modification during iteration
-                        var players = arena.Players.ToList();
-                        foreach (Player p in players)
-                        {
-                            // Guard clauses to skip invalid players
-                            if (p == null || p.StatsLastGame == null || p._team == null) continue;
-                            if (!p._team._name.Contains(" T") && !p._team._name.Contains(" C")) continue;
-
-                            ctfPlayerProxy.player = p;
-                            double gameLengthMinutes = (arena._tickGameEnded - arena._tickGameStarted) / (1000.0 * 60.0);
-                            string result = "Loss";
-                            
-                            if (gameMode == "OvD")
-                            {
-                                bool isOffense = p._team.ActivePlayers.Any(player => 
-                                    playerLastSkillNames.ContainsKey(player) && 
-                                    playerLastSkillNames[player] == "Squad Leader");
-
-                                if (isOffense)
-                                {
-                                    if (winningTeamOVD == "offense")
+                                    // Use existing case logic to check coordinates
+                                    switch (baseUsed)
                                     {
-                                        result = "Win";
+                                        case "D7":
+                                            startX = 255 * 16; endX = 328 * 16;
+                                            startY = 435 * 16; endY = 505 * 16;
+                                            if (flag.posX >= startX && flag.posX <= endX && 
+                                                flag.posY >= startY && flag.posY <= endY)
+                                                detectedBase = "D7";
+                                            break;
+                                        case "F6":
+                                            startX = 375 * 16; endX = 481 * 16;
+                                            startY = 435 * 16; endY = 509 * 16;
+                                            if (flag.posX >= startX && flag.posX <= endX && 
+                                                flag.posY >= startY && flag.posY <= endY)
+                                                detectedBase = "F6";
+                                            break;
+                                        case "F4":
+                                            startX = 367 * 16; endX = 435 * 16;
+                                            startY = 224 * 16; endY = 306 * 16;
+                                            if (flag.posX >= startX && flag.posX <= endX && 
+                                                flag.posY >= startY && flag.posY <= endY)
+                                                detectedBase = "F4";
+                                            break;
+                                        case "A7":
+                                            startX = 255 * 16; endX = 328 * 16;
+                                            startY = 435 * 16; endY = 505 * 16;
+                                            if (flag.posX >= startX && flag.posX <= endX && 
+                                                flag.posY >= startY && flag.posY <= endY)
+                                                detectedBase = "A7";
+                                            break;
+                                        case "A5":
+                                            startX = 4 * 16; endX = 79 * 16;
+                                            startY = 305 * 16; endY = 377 * 16;
+                                            if (flag.posX >= startX && flag.posX <= endX && 
+                                                flag.posY >= startY && flag.posY <= endY)
+                                                detectedBase = "A5";
+                                            break;
+                                        case "B6":
+                                            startX = 128 * 16; endX = 203 * 16;
+                                            startY = 432 * 16; endY = 515 * 16;
+                                            if (flag.posX >= startX && flag.posX <= endX && 
+                                                flag.posY >= startY && flag.posY <= endY)
+                                                detectedBase = "B6";
+                                            break;
+                                        default:
+                                            startX = 0; endX = 0;
+                                            startY = 0; endY = 0;
+                                            break;
                                     }
-                                }
-                                else
-                                {
-                                    if (winningTeamOVD != "offense")
+                                    // Arena message for base used for that team
+                                    //arena.sendArenaMessage(string.Format("Team {0} used base {1}", team._name, detectedBase));
+
+                                    if (detectedBase != "Unknown")
                                     {
-                                        result = "Win";
+                                        //arena.sendArenaMessage(string.Format("Team {0} is using base {1}", team._name, detectedBase));
                                     }
                                 }
                             }
-                            else
-                            {
-                                if (winningTeam != null && p._team == winningTeam)
-                                {
-                                    result = "Win";
-                                }
-                            }
 
-                            string side = "N/A";
-                            if (gameMode == "Mix")
+                            // Cache the players list to avoid potential modification during iteration
+                            var players = arena.Players.ToList();
+                            foreach (Player p in players)
                             {
-                                var teamSummonedCounts = summonedCounts.Where(x => x.Key.ToString() == p._team._name).ToList();
-                                if (teamSummonedCounts.Count > 0)
+                                // Guard clauses to skip invalid players
+                                if (p == null || p.StatsLastGame == null || p._team == null) continue;
+                                if (!p._team._name.Contains(" T") && !p._team._name.Contains(" C")) continue;
+
+                                ctfPlayerProxy.player = p;
+                                double gameLengthMinutes = (arena._tickGameEnded - arena._tickGameStarted) / (1000.0 * 60.0);
+                                string result = "Loss";
+                                string side = "N/A";
+                                
+                                // Determine side based on game mode
+                                if (gameMode == "OvD")
                                 {
-                                    var top4 = teamSummonedCounts.OrderByDescending(x => x.Value).Take(4);
-                                    side = top4.Any(x => x.Key == p._id) ? "offense" : "defense";
-                                }
-                                else
-                                {
-                                    string skill = GetPrimarySkillName(p);
-                                    if (skill == "Squad Leader")
+                                    // Check if player's team has a Squad Leader
+                                    bool teamHasSquadLeader = p._team.ActivePlayers.Any(player => 
+                                        playerLastSkillNames.ContainsKey(player) && 
+                                        playerLastSkillNames[player] == "Squad Leader");
+                                    
+                                    // Check if player's team has a Field Medic or Combat Engineer
+                                    bool teamHasDefenseClass = p._team.ActivePlayers.Any(player => 
+                                        playerLastSkillNames.ContainsKey(player) && 
+                                        (playerLastSkillNames[player] == "Field Medic" || 
+                                         playerLastSkillNames[player] == "Combat Engineer"));
+                                    
+                                    // Assign side based on team composition
+                                    if (teamHasSquadLeader)
                                     {
                                         side = "offense";
+                                        // If offense team and offense won, it's a win
+                                        result = (winningTeamOVD == "offense") ? "Win" : "Loss";
                                     }
-                                    else if (skill == "Field Medic" || skill == "Combat Engineer")
+                                    else if (teamHasDefenseClass)
                                     {
                                         side = "defense";
+                                        // If defense team and offense didn't win, it's a win
+                                        result = (winningTeamOVD != "offense") ? "Win" : "Loss";
                                     }
                                 }
-                            }
-
-                            string mainClass = "Unknown";
-                            if (playerClassPlayTimes.ContainsKey(p))
-                            {
-                                var playTimes = playerClassPlayTimes[p];
-                                if (playTimes.Any())
+                                else if (gameMode == "Mix")
                                 {
-                                    mainClass = playTimes.OrderByDescending(x => x.Value).First().Key;
+                                    // Get summoned counts for this player's team only
+                                    var teamPlayers = p._team.ActivePlayers.Select(player => player._id).ToList();
+                                    var teamSummonedCounts = new Dictionary<ushort, int>();
+                                    
+                                    // Filter summoned counts to only include players from this team
+                                    foreach (var entry in summonedCounts)
+                                    {
+                                        if (teamPlayers.Contains(entry.Key))
+                                        {
+                                            teamSummonedCounts[entry.Key] = entry.Value;
+                                        }
+                                    }
+                                    
+                                    if (teamSummonedCounts.Count > 0)
+                                    {
+                                        // Get the top 4 most summoned players from this team
+                                        var top4 = teamSummonedCounts.OrderByDescending(x => x.Value).Take(4).Select(x => x.Key).ToList();
+                                        side = top4.Contains(p._id) ? "offense" : "defense";
+                                    }
+                                    else
+                                    {
+                                        // Fallback if no summon data
+                                        string skill = GetPrimarySkillName(p);
+                                        if (skill == "Squad Leader")
+                                        {
+                                            side = "offense";
+                                        }
+                                        else if (skill == "Field Medic" || skill == "Combat Engineer")
+                                        {
+                                            side = "defense";
+                                        }
+                                    }
+                                    
+                                    // Determine win/loss for Mix mode
+                                    if (winningTeam != null && p._team == winningTeam)
+                                    {
+                                        result = "Win";
+                                    }
                                 }
-                            }
-                            if (mainClass == "Unknown")
-                            {
-                                mainClass = GetPrimarySkillName(p);
-                            }
-
-                            int turretDamage = playerDamageStats.ContainsKey(p._id) ? playerDamageStats[p._id] : 0;
-
-                            if (gameMode == "OvD" && p._team != null)
-                            {
-                                bool hasSquadLeader = p._team.ActivePlayers.Any(player => 
-                                    playerLastSkillNames.ContainsKey(player) && 
-                                    playerLastSkillNames[player] == "Squad Leader");
-
-                                bool hasFieldMedic = p._team.ActivePlayers.Any(player => 
-                                    playerLastSkillNames.ContainsKey(player) && 
-                                    playerLastSkillNames[player] == "Field Medic");
-
-                                bool hasCombatEngineer = p._team.ActivePlayers.Any(player => 
-                                    playerLastSkillNames.ContainsKey(player) && 
-                                    playerLastSkillNames[player] == "Combat Engineer");
-
-                                if (hasSquadLeader)
+                                else
                                 {
-                                    side = "offense";
+                                    // For other game modes
+                                    if (winningTeam != null && p._team == winningTeam)
+                                    {
+                                        result = "Win";
+                                    }
                                 }
-                                else if (hasFieldMedic || hasCombatEngineer)
+
+                                string mainClass = "Unknown";
+                                if (playerClassPlayTimes.ContainsKey(p))
                                 {
-                                    side = "defense";
+                                    var playTimes = playerClassPlayTimes[p];
+                                    if (playTimes.Any())
+                                    {
+                                        mainClass = playTimes.OrderByDescending(x => x.Value).First().Key;
+                                    }
                                 }
+                                if (mainClass == "Unknown")
+                                {
+                                    mainClass = GetPrimarySkillName(p);
+                                }
+
+                                int turretDamage = playerDamageStats.ContainsKey(p._id) ? playerDamageStats[p._id] : 0;
+                                int classSwaps = playerClassSwaps.ContainsKey(p) ? playerClassSwaps[p] : 0;
+
+                                writer.WriteLine(string.Format("{0},{1},{2},{3},{4},{5},{6},{7:F2},{8},{9},{10},{11},{12},{13},{14}",
+                                    p._alias.Replace(",", ""),
+                                    p._team._name ?? "None",
+                                    p.StatsLastGame.kills,
+                                    p.StatsLastGame.deaths,
+                                    p.StatsLastGame.zonestat5,
+                                    p.StatsLastGame.zonestat7,
+                                    p.StatsLastGame.zonestat3,
+                                    gameLengthMinutes,
+                                    result,
+                                    mainClass,
+                                    classSwaps,
+                                    turretDamage,
+                                    gameMode,
+                                    side,
+                                    baseUsed));
+
+                                ctfPlayerProxy.player = null;
                             }
-
-                            int classSwaps = playerClassSwaps.ContainsKey(p) ? playerClassSwaps[p] : 0;
-
-                            writer.WriteLine(string.Format("{0},{1},{2},{3},{4},{5},{6},{7:F2},{8},{9},{10},{11},{12},{13},{14}",
-                                p._alias.Replace(",", ""),
-                                p._team._name ?? "None",
-                                p.StatsLastGame.kills,
-                                p.StatsLastGame.deaths,
-                                p.StatsLastGame.zonestat5,
-                                p.StatsLastGame.zonestat7,
-                                p.StatsLastGame.zonestat3,
-                                gameLengthMinutes,
-                                result,
-                                mainClass,
-                                classSwaps,
-                                turretDamage,
-                                gameMode,
-                                side,
-                                baseUsed));
-
-                            ctfPlayerProxy.player = null;
                         }
                     }
                 }
@@ -7574,8 +8177,8 @@ private Player FindPlayerByAlias(string alias)
             // Explosion occurred at coordinates arena message:
             //arena.sendArenaMessage(string.Format("{0} exploded at {1}, {2}, {3}", usedWep.name, posX, posY, posZ));
 
-            // EB's hit stats for projectiles (IDs 1163 through 1166)
-            if (usedWep.id >= 1163 && usedWep.id <= 1166)
+            // EB's hit stats for projectiles (IDs 1163 through 1166) or 1246
+            if (usedWep.id >= 1163 && usedWep.id <= 1166 || usedWep.id == 1246)
             {
                 // Get players within 20 pixels of explosion
                 List<Player> playersInRange = arena.getPlayersInRange(posX, posY, 20);
@@ -7642,10 +8245,6 @@ private Player FindPlayerByAlias(string alias)
                     case 3013: // Kuchler AR
                     case 3018: // Titan AR
                     case 1179: // Haywire (128 radius)
-                    case 1178: // Haywire (102.4 radius)
-                    case 1173: // Haywire (76.8 radius)
-                    case 1174: // Haywire (51.2 radius)
-                    case 1175: // Haywire (25.6 radius)
 
                         stats.ShotsFired++;
                         // Map this explosion to its shooter using a composite key
@@ -7654,6 +8253,93 @@ private Player FindPlayerByAlias(string alias)
                         // arena.sendArenaMessage(string.Format("{0} fired weapon {1} (Total shots: {2})", 
                         //     from._alias, usedWep.name, stats.ShotsFired));
                         break;
+                }
+            }
+
+            // Joe's Caw
+            if ((from._alias == "NewJack") && usedWep.id == 5050 && isChampEnabled)
+            {
+                // Initialize tracking for Joe's CAW shots if not exists
+                if (!_playerWeaponStats.ContainsKey(from))
+                {
+                    _playerWeaponStats[from] = new Dictionary<int, WeaponStats>();
+                }
+                
+                // Use the CAW weapon ID for tracking
+                int cawWeaponId = 5050; // CAW ID from the switch case above
+                if (!_playerWeaponStats[from].ContainsKey(cawWeaponId))
+                {
+                    _playerWeaponStats[from][cawWeaponId] = new WeaponStats();
+                }
+                
+                // Increment shot counter
+                _playerWeaponStats[from][cawWeaponId].ShotsFired++;
+                
+                // Check if this is the 10th shot
+                if (_playerWeaponStats[from][cawWeaponId].ShotsFired % 10 == 0)
+                {
+                    // Display "CAW!" at Joe's location
+                    string word = "CAW!";
+                    // Define offsets so that "C" is at 0, "A" is at 8, then "W" and "!" maintain a 10 unit spacing relative to "A"
+                    int aOffset = 8;
+                    int awSpacing = 10;
+                    int[] letterOffsets = new int[word.Length];
+                    letterOffsets[0] = 0; // "C"
+                    for (int i = 1; i < word.Length; i++)
+                    {
+                        letterOffsets[i] = aOffset + (i - 1) * awSpacing;
+                    }
+
+                    for (int i = 0; i < word.Length; i++)
+                    {
+                        char letter = word[i];
+                        ItemInfo.Projectile letterWep = AssetManager.Manager.getItemByName(letter.ToString()) as ItemInfo.Projectile;
+                        if (letterWep != null)
+                        {
+                            short newPosX = (short)(from._state.positionX + letterOffsets[i]);
+                            HandleExplosionProjectile(newPosX, from._state.positionY, 48, letterWep.id, from._id, from._state.yaw);
+                        }
+                    }
+
+                    // Schedule the second "CAW!" after 0.25 seconds using the same offsets
+                    Task.Delay(250).ContinueWith(_ =>
+                    {
+                        for (int i = 0; i < word.Length; i++)
+                        {
+                            char letter = word[i];
+                            ItemInfo.Projectile letterWep = AssetManager.Manager.getItemByName(letter.ToString()) as ItemInfo.Projectile;
+                            if (letterWep != null)
+                            {
+                                short newPosX = (short)(from._state.positionX + letterOffsets[i]);
+                                HandleExplosionProjectile(newPosX, from._state.positionY, from._state.positionZ, letterWep.id, from._id, from._state.yaw);
+                            }
+                        }
+                    });
+
+                }
+            }
+
+            // Dilatory's Stunner
+            // if (from._alias == "Dilatory" && usedWep.name == "Stunner" && isChampEnabled){
+            //     // Get players within 20 pixels of explosion
+            //     List<Player> playersInRange = arena.getPlayersInRange(posX, posY, 128);
+                
+            //     if (playersInRange.Count > 0)
+            //     {
+            //         Helpers.Player_RouteExplosion(arena.Players, 1322, posX, posY, posZ, (byte)from._state.yaw, (ushort)from._id);
+            //         return true;
+            //     }
+            // }
+
+            // Jay/SMOKA's GG G9
+            if (from._alias == "jay" && usedWep.name == "Maklov g9 Sniper" && isChampEnabled){
+                // Get players within 20 pixels of explosion
+                List<Player> playersInRange = arena.getPlayersInRange(posX, posY, 20);
+                
+                if (playersInRange.Count > 0)
+                {
+                    Helpers.Player_RouteExplosion(arena.Players, 1307, posX, posY, posZ, (byte)from._state.yaw, (ushort)from._id);
+                    return true;
                 }
             }
 
@@ -8475,6 +9161,16 @@ private Player FindPlayerByAlias(string alias)
                         player.sendMessage(0, string.Format("~{0}", champItemName));
                     }
                 }
+                else if (s3Champs.Any(alias => alias.Equals(player._alias, StringComparison.OrdinalIgnoreCase)))
+                {
+                    player.sendMessage(0, "$Season 3 Champion Items:");
+                    foreach (var kvp in s3Conversions)
+                    {
+                        ItemInfo champItem = AssetManager.Manager.getItemByID(kvp.Value);
+                        string champItemName = champItem != null ? champItem.name : "Unknown";
+                        player.sendMessage(0, string.Format("~{0}", champItemName));
+                    }
+                }   
             }
 
             if (!arena._name.Contains("Arena 1"))
@@ -8700,6 +9396,197 @@ private Player FindPlayerByAlias(string alias)
             //     return false; // Return false to prevent other handlers from processing
             // }
 
+            // Command to clear the swing dictionary
+            if (command.Equals("clearswing", StringComparison.OrdinalIgnoreCase))
+            {
+                swingDictionary.Clear();
+                player.sendMessage(0, "Swing dictionary cleared");
+                return true;
+            }
+
+            // Command to add a player to the swing dictionary
+            if (command.Equals("addswing", StringComparison.OrdinalIgnoreCase))
+            {
+                //player.sendMessage(0, string.Format("Debug: Processing addswing command with payload: '{0}'", payload));
+                
+                // Check if this is a private message to a player
+                if (recipient != null)
+                {
+                    // Payload format: side (T or C)
+                    string side = payload.Trim().ToUpper();
+                    if (side != "T" && side != "C")
+                    {
+                        player.sendMessage(0, "Usage: /*addswing <T or C>");
+                        return true;
+                    }
+                    
+                    // Add the recipient to the swing dictionary
+                    swingDictionary[recipient._alias] = side;
+                    //player.sendMessage(0, string.Format("Added {0} to the swing dictionary as {1}", recipient._alias, side));
+                    //player.sendMessage(0, string.Format("Debug: Dictionary now contains {0} entries", swingDictionary.Count));
+                    return true;
+                }
+                else
+                {
+                    // Public command format: alias:side (T or C)
+                    string[] parts = payload.Split(new char[] { ':' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length != 2)
+                    {
+                        player.sendMessage(0, "Usage: addswing <alias>:<side> (T or C)");
+                        return true;
+                    }
+                    
+                    string playerAlias = parts[0].Trim();
+                    string side = parts[1].Trim().ToUpper();
+                    
+                    if (side != "T" && side != "C")
+                    {
+                        player.sendMessage(0, "Side must be either T or C");
+                        return true;
+                    }
+                    
+                    // Add the player to the swing dictionary
+                    swingDictionary[playerAlias] = side;
+                    //player.sendMessage(0, string.Format("Added {0} to the swing dictionary as {1}", playerAlias, side));
+                    //player.sendMessage(0, string.Format("Debug: Dictionary now contains {0} entries", swingDictionary.Count));
+                    return true;
+                }
+            }
+
+            // Command to do a series of actions to a player
+            if (command.Equals("swing", StringComparison.OrdinalIgnoreCase))
+            {
+                player.sendMessage(0, string.Format("Debug: Executing swing command. Dictionary contains {0} entries", swingDictionary.Count));
+                
+                if (swingDictionary.Count == 0)
+                {
+                    //player.sendMessage(0, "No players in swing dictionary. Use addswing command first.");
+                    return true;
+                }
+                
+                // Process all players in the swing dictionary
+                foreach (var entry in swingDictionary)
+                {
+                    string playerAlias = entry.Key;
+                    string targetSide = entry.Value;
+                    
+                    //player.sendMessage(0, string.Format("Debug: Processing swing for {0} to side {1}", playerAlias, targetSide));
+                    
+                    // Find the player by alias
+                    Player targetPlayer = arena.Players.FirstOrDefault(p => p._alias == playerAlias);
+                    if (targetPlayer == null)
+                    {
+                        //player.sendMessage(0, string.Format("Player {0} not found in arena", playerAlias));
+                        continue;
+                    }
+                    
+                    // 1) Unspec the player if they're a spectator
+                    if (targetPlayer.IsSpectator)
+                    {
+                        Team targetTeam = null;
+                        
+                        // Determine which team to join based on swing dictionary
+                        if (targetSide == "T")
+                        {
+                            // Find a team with "T" in the name that has players on it
+                            foreach (Team team in arena.Teams)
+                            {
+                                if (team._name.Contains(" T") && team.ActivePlayerCount > 0)
+                                {
+                                    targetTeam = team;
+                                    break;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            // Find a team with "C" in the name
+                            foreach (Team team in arena.Teams)
+                            {
+                                if (team._name.Contains(" C") && team.ActivePlayerCount > 0)
+                                {
+                                    targetTeam = team;
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        if (targetTeam != null)
+                        {
+                            //player.sendMessage(0, string.Format("Debug: Unspeccing {0} to team {1}", targetPlayer._alias, targetTeam._name));
+                            targetPlayer.unspec(targetTeam);
+                        }
+                        else
+                        {
+                            //player.sendMessage(0, string.Format("Debug: Could not find appropriate team for side {0}", targetSide));
+                        }
+                    }
+                    
+                    // 2) Warp the player to a random teammate that is not dead
+                    if (!targetPlayer.IsSpectator && targetPlayer._team != null)
+                    {
+                        // Get all teammates who are not dead
+                        var aliveTeammates = targetPlayer._arena.Players
+                            .Where(p => p._team == targetPlayer._team && p != targetPlayer && !p.IsDead)
+                            .ToList();
+                        
+                        //player.sendMessage(0, string.Format("Debug: Found {0} alive teammates for {1}", aliveTeammates.Count, targetPlayer._alias));
+                        
+                        if (aliveTeammates.Count > 0)
+                        {
+                            // Select a random teammate
+                            Random rand = new Random();
+                            Player randomTeammate = aliveTeammates[rand.Next(aliveTeammates.Count)];
+                            
+                            // Warp player to the random teammate's position
+                            //player.sendMessage(0, string.Format("Debug: Warping {0} to teammate {1} at position ({2}, {3})", 
+                            //    targetPlayer._alias, randomTeammate._alias, randomTeammate._state.positionX, randomTeammate._state.positionY));
+                            targetPlayer.warp(randomTeammate._state.positionX, randomTeammate._state.positionY);
+                        }
+                    }
+                    
+                    // 3) Set their energy to -500 of their max energy
+                    if (!targetPlayer.IsSpectator)
+                    {
+                        int currentEnergy = targetPlayer._state.energy;
+                        int newEnergy = Math.Max(0, currentEnergy - 500);
+                        //player.sendMessage(0, string.Format("Debug: Reducing {0}'s energy from {1} to {2}", 
+                        //    targetPlayer._alias, currentEnergy, newEnergy));
+                        targetPlayer.setEnergy((short)newEnergy);
+                    }
+                    
+                    // Notify the mod who issued the command
+                    //player.sendMessage(0, string.Format("Applied swing to player: {0}", targetPlayer._alias));
+                }
+                
+                return true;
+            }
+
+            if (command.Equals("summonstats", StringComparison.OrdinalIgnoreCase))
+            {
+                // Rank the summonStats in order, per team as a separate list, and print out the message in separate lines for each player.
+                // Have team Collective (decided by a name with " C" in it) and Titan (decided by a name with " T" in it) be the two teams to compare.
+                var collectiveSummonedCounts = summonedCounts.Where(x => x.Key.ToString().Contains(" C")).ToList();
+                var titanSummonedCounts = summonedCounts.Where(x => x.Key.ToString().Contains(" T")).ToList();
+
+                // Sort the lists
+                collectiveSummonedCounts = collectiveSummonedCounts.OrderByDescending(x => x.Value).ToList();
+                titanSummonedCounts = titanSummonedCounts.OrderByDescending(x => x.Value).ToList();
+
+                // print the message start with @ for Collective, ~ for Titan.
+                player.sendMessage(0, "!Collective");
+                foreach (var item in collectiveSummonedCounts)
+                {
+                    player.sendMessage(0, string.Format("@{0} {1}", item.Key, item.Value));
+                }   
+                player.sendMessage(0, "Titan");
+                foreach (var item in titanSummonedCounts)
+                {
+                    player.sendMessage(0, string.Format("~{0} {1}", item.Key, item.Value));
+                }
+                return true;
+            }
+
             // Toggle playerWeaponStats enable/disable
             if (command.Equals("weaponstats", StringComparison.OrdinalIgnoreCase))
             {
@@ -8743,6 +9630,12 @@ private Player FindPlayerByAlias(string alias)
                 return false;
             }
 
+            if (command.Equals("exportstate", StringComparison.OrdinalIgnoreCase))
+            {
+                ExportStateToCSV(player, payload, payload);
+                return true;
+            }
+
             if (command.Equals("autosave", StringComparison.OrdinalIgnoreCase))
             {
                 bool enable;
@@ -8755,7 +9648,37 @@ private Player FindPlayerByAlias(string alias)
                 return true;
             }
 
-            if (command.Equals("savestate", StringComparison.OrdinalIgnoreCase)){
+            if (command.Equals("saveplaybook", StringComparison.OrdinalIgnoreCase) || command.Equals("sp", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!string.IsNullOrEmpty(payload))
+                {
+                    SavePlaybook(payload);
+                    SaveState(payload);
+                }
+                player.sendMessage(0, string.Format("Playbook state '{0}' saved successfully.", payload));
+                return true;
+            }
+
+            if (command.Equals("loadplaybook", StringComparison.OrdinalIgnoreCase) || command.Equals("lp", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!string.IsNullOrEmpty(payload))
+                {
+                    LoadPlaybook(payload);
+                    SaveState(payload);
+                }   
+                return true;
+            } 
+
+            if (command.Equals("exportplaybook", StringComparison.OrdinalIgnoreCase) || command.Equals("ep", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!string.IsNullOrEmpty(payload))
+                {
+                    ExportPlayBook(payload);
+                }   
+                return true;
+            }
+
+            if (command.Equals("savestate", StringComparison.OrdinalIgnoreCase) || command.Equals("ss", StringComparison.OrdinalIgnoreCase)){
                 if (!string.IsNullOrEmpty(payload))
                 {
                     SaveState(payload);
@@ -8763,7 +9686,7 @@ private Player FindPlayerByAlias(string alias)
                 return true;
             }
             
-            if (command.Equals("loadstate", StringComparison.OrdinalIgnoreCase)){
+            if (command.Equals("loadstate", StringComparison.OrdinalIgnoreCase) || command.Equals("ls", StringComparison.OrdinalIgnoreCase)){
                 if (!string.IsNullOrEmpty(payload))
                 {
                     if (payload.Equals("next", StringComparison.OrdinalIgnoreCase))
@@ -8774,6 +9697,15 @@ private Player FindPlayerByAlias(string alias)
                     {
                         LoadState(payload);
                     }
+                }
+                return true;
+            }
+
+            if (command.Equals("loadstatepause", StringComparison.OrdinalIgnoreCase) || command.Equals("lsp", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!string.IsNullOrEmpty(payload))
+                {
+                    LoadStatePause(payload);
                 }
                 return true;
             }
@@ -8950,19 +9882,36 @@ private Player FindPlayerByAlias(string alias)
                     }
 
                     SpawnVehicle(side, inputLocation);
+                    return true;
                 }
                 else
                 {
                     player.sendMessage(-1, "Usage: *base <side> <location>");
                     player.sendMessage(-1, string.Format("Valid sides: {0}", string.Join(", ", validSides)));
                     player.sendMessage(-1, string.Format("Valid locations: {0}", string.Join(", ", locations.Keys)));
+                    return false;
                 }
             }
 
             if (command.Equals("min", StringComparison.OrdinalIgnoreCase))
             {
                 CountItemsOnSpecificTerrain(arena);
+                return true;
             }
+
+            // if (command.Equals("min2", StringComparison.OrdinalIgnoreCase))
+            // {
+            //     InfServer.Game.Arena.ItemDrop item = arena.getItemInRange(arena._server._assets.getItemByName("Titanium Oxide"), (short)650, (short)450, (int)300);
+            //     if (item != null)
+            //     {
+            //         arena.sendArenaMessage(string.Format("Item: {0}, Quantity: {1}", item.item.name, item.quantity));
+            //     }
+            //     else
+            //     {
+            //         arena.sendArenaMessage("No Titanium Oxide found in range.");
+            //     }
+            //     return true;
+            // }
 
             if (command.Equals("privateteams", StringComparison.OrdinalIgnoreCase) || command.Equals("pt", StringComparison.OrdinalIgnoreCase))
             {
@@ -9042,6 +9991,7 @@ private Player FindPlayerByAlias(string alias)
             if (command.Equals("fireworks"))
             {
                 LaunchFireworks(player);
+                return true;
             }
 
             if (command.Equals("setup"))
